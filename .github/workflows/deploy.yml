@@ -1,0 +1,103 @@
+name: Deploy bpm backend to VPS
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'docs/**'
+  workflow_dispatch:        # trigger manual desde la UI de Actions
+
+concurrency:
+  group: deploy-backend     # un solo deploy a la vez
+  cancel-in-progress: false # si llega otro mientras hay uno corriendo, espera
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17 (Temurin) + Maven cache
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build jar (skip tests for now — UX gates en futuro Iter)
+        run: mvn -B package -DskipTests
+
+      - name: Verify jar exists
+        run: |
+          test -f target/bpm-0.0.1-SNAPSHOT.jar
+          ls -lh target/bpm-0.0.1-SNAPSHOT.jar
+
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add VPS host key to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p ${{ secrets.VPS_PORT }} -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: SCP jar to VPS /tmp
+        run: |
+          scp -P ${{ secrets.VPS_PORT }} \
+            target/bpm-0.0.1-SNAPSHOT.jar \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/bpm.jar.new
+
+      - name: Deploy + verify health + auto-rollback
+        run: |
+          ssh -p ${{ secrets.VPS_PORT }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} bash -s <<'REMOTE'
+            set -e
+            echo "[$(date)] Backing up old jar (preserving ownership for rollback)..."
+            cp -p /opt/imap/bpm/bpm.jar /opt/imap/bpm/bpm.jar.bak
+
+            echo "[$(date)] Installing new jar..."
+            mv /tmp/bpm.jar.new /opt/imap/bpm/bpm.jar
+            chown bpmuser:bpmuser /opt/imap/bpm/bpm.jar
+            chmod 640 /opt/imap/bpm/bpm.jar
+
+            echo "[$(date)] Restarting imap-bpm service..."
+            systemctl restart imap-bpm
+
+            echo "[$(date)] Waiting for health 200 (max 30s)..."
+            for i in $(seq 1 15); do
+              sleep 2
+              STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8093/imap/bpm/actuator/health || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "[$(date)] ✅ Health OK after ${i} polls"
+                # Mantenemos el .bak por las dudas (próximo deploy lo sobrescribe).
+                exit 0
+              fi
+              echo "[$(date)] poll #$i: HTTP $STATUS"
+            done
+
+            echo "[$(date)] ❌ Health check failed after 30s — rolling back"
+            mv /opt/imap/bpm/bpm.jar.bak /opt/imap/bpm/bpm.jar
+            systemctl restart imap-bpm
+            sleep 14
+            FINAL=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8093/imap/bpm/actuator/health || echo "000")
+            echo "[$(date)] After rollback, health = $FINAL"
+            exit 1
+          REMOTE
+
+      - name: External smoke test (https://imaps.com.ar)
+        run: |
+          for i in $(seq 1 5); do
+            STATUS=$(curl -s -o /dev/null -w '%{http_code}' https://imaps.com.ar/imap/bpm/actuator/health || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ External health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS"
+            sleep 3
+          done
+          echo "❌ External health check failed"
+          exit 1
