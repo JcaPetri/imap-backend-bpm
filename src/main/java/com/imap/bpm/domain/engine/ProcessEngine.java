@@ -407,7 +407,7 @@ public class ProcessEngine {
                        : endEvent.config().getOrDefault("result", "default"),
                        "endEventCode", endEvent.code()));
             log.info("ProcessInstance {} completed via {}", instance.getId(), endEvent.code());
-            metricInc("bpm.instance.ended");
+            metricInc("bpm.instance.ended", instance.getProcessdefId().toString());
 
             // B1 — si es child de un sub_process, notificar al parent para
             // que avance el token waiting en el sub_process flow_element.
@@ -468,7 +468,7 @@ public class ProcessEngine {
             form != null ? form.entityDefCode() : "none",
             task.getAssignedUserId(),
             boundariesScheduled);
-        metricInc("bpm.task.created");
+        metricInc("bpm.task.created", def);
     }
 
     // ─── boundary_event (B2 — interrupting timer sobre user_task) ───────────
@@ -696,7 +696,7 @@ public class ProcessEngine {
         audit(instance, "instance.cancelled", null, null, userId, auditData);
         log.info("Instance {} cancelled (reason={}) — tokens={}, tasks={}, jobs={}, corrs={}",
             instanceId, reason, tokensCancelled, tasksCancelled, jobsCancelled, corrsCancelled);
-        metricInc("bpm.instance.cancelled");
+        metricInc("bpm.instance.cancelled", instance.getProcessdefId().toString());
 
         return auditData;
     }
