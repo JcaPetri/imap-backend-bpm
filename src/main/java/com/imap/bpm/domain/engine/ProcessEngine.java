@@ -1214,7 +1214,7 @@ public class ProcessEngine {
         audit(instance, "subprocess.spawning", subProcess.id(), token.getId(), userId, Map.of(
             "elementCode", subProcess.code(),
             "calledProcessversionId", calledProcessVersionId.toString(),
-            "passVariables", childPayload.keySet(),
+            "passVariables", new ArrayList<>(childPayload.keySet()),   // Set→List (Jackson)
             "waitForCompletion", waitForCompletion
         ));
 
