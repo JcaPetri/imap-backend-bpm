@@ -24,16 +24,19 @@ import java.util.*;
  *   - user_task         → token.waiting + crea TaskInstance + detiene
  *   - service_task      → MVP: audita + avanza al siguiente (sin invocar service real)
  *   - exclusive_gateway → evalúa conditions JEXL, avanza el primero que matchea
+ *   - parallel_gateway  → SPLIT (1-in N-out: emite N child tokens) +
+ *                         JOIN  (M-in 1-out: espera todos siblings con mismo
+ *                                parent_token_id antes de avanzar al outgoing)
+ *   - intermediate_event (timer): A2 — programa job_executor con fire_at,
+ *                         token.waiting, JobExecutorWorker @Scheduled lo
+ *                         dispara al vencer y reactiva el token.
  *
- * NO soportado en MVP:
- *   - parallel_gateway  (split + join)
- *   - intermediate_event (timer/message/signal)
+ * NO soportado todavía (backlog Paso 07+):
+ *   - intermediate_event (message/signal — solo timer hoy)
  *   - sub_process       (call activity)
  *   - boundary_event    (timer/error/escalation)
  *   - compensation
- *
- * Se agregan en iters siguientes. La estructura de Token + advanceToken ya está
- * preparada para split/join (parent_token_id existe en la entity).
+ *   - DMN engine (decision tables)
  */
 @Service
 public class ProcessEngine {
@@ -52,6 +55,8 @@ public class ProcessEngine {
     private final TaskInstanceRepository taskRepo;
     private final VariableRepository varRepo;
     private final AuditLogRepository auditRepo;
+    private final JobExecutorRepository jobRepo;
+    private final MessageCorrelationRepository msgCorrRepo;
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
 
@@ -61,6 +66,8 @@ public class ProcessEngine {
                          TaskInstanceRepository taskRepo,
                          VariableRepository varRepo,
                          AuditLogRepository auditRepo,
+                         JobExecutorRepository jobRepo,
+                         MessageCorrelationRepository msgCorrRepo,
                          ObjectMapper jackson) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
@@ -68,6 +75,8 @@ public class ProcessEngine {
         this.taskRepo = taskRepo;
         this.varRepo = varRepo;
         this.auditRepo = auditRepo;
+        this.jobRepo = jobRepo;
+        this.msgCorrRepo = msgCorrRepo;
         this.jackson = jackson;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
@@ -225,6 +234,14 @@ public class ProcessEngine {
                 handleExclusiveGateway(instance, token, current, def, userId);
                 break;
 
+            case "parallel_gateway":
+                handleParallelGateway(instance, token, current, def, userId);
+                break;
+
+            case "intermediate_event":
+                handleIntermediateEvent(instance, token, current, def, userId);
+                break;
+
             default:
                 log.warn("Unsupported flow_element type '{}' — token blocked at {}",
                     current.type(), current.code());
@@ -314,6 +331,11 @@ public class ProcessEngine {
         task.setLifecycle("created");
         task.setPriority(50);
         task.setInputData(inputData);
+        // A3 — AssignmentRule MVP: assignedUser default = quien arrancó el
+        // proceso. Cuando llegue Iter 5 AssignmentRule, acá se consulta
+        // bpm_hum_assignmentrule del flowelement (user / role / group / expr).
+        task.setAssignedUserId(instance.getStartedById());
+        task.setAssignedAt(now);
         task.setStateId(DEFAULT_STATE_ACTIVE);
         task.setCreatedAt(now);
         task.setUpdatedAt(now);
@@ -323,10 +345,14 @@ public class ProcessEngine {
         audit(instance, "task.created", userTask.id(), token.getId(), userId, Map.of(
             "taskInstanceId", task.getId().toString(),
             "elementCode", userTask.code(),
+            "assignedUserId", task.getAssignedUserId() != null
+                ? task.getAssignedUserId().toString() : "(none)",
             "formEntityDefCode", form != null ? form.entityDefCode() : "(none)"
         ));
-        log.info("UserTask '{}' created → task {} waiting (form={})",
-            userTask.code(), task.getId(), form != null ? form.entityDefCode() : "none");
+        log.info("UserTask '{}' created → task {} waiting (form={}, assignedTo={})",
+            userTask.code(), task.getId(),
+            form != null ? form.entityDefCode() : "none",
+            task.getAssignedUserId());
     }
 
     // ─── exclusive_gateway ──────────────────────────────────────────────────
@@ -366,6 +392,539 @@ public class ProcessEngine {
             "conditionExpr", chosen.conditionExpr() == null ? "(default)" : chosen.conditionExpr()
         ));
         moveTokenToElement(instance, token, chosen.targetId(), def, userId);
+    }
+
+    // ─── parallel_gateway (A1 — AND-split / AND-join) ────────────────────────
+
+    /**
+     * Maneja parallel_gateway según su "forma" topológica en el grafo:
+     *
+     *   1 in / N out  → SPLIT: consume el token actual, emite N child tokens
+     *                   (uno por outgoing), cada uno con parent_token_id = token
+     *                   actual. Avanza recursivamente cada child.
+     *   M in / 1 out  → JOIN : marca el token como waiting en el gateway. Si
+     *                   YA llegaron M tokens hermanos (mismo parent_token_id)
+     *                   esperando, consume todos y emite 1 token en el outgoing
+     *                   con parent_token_id = "grandparent" (el padre del nivel
+     *                   superior, restaurando el nivel de paralelismo).
+     *   1 in / 1 out  → passthrough degenerado (avanza como un nodo normal).
+     *   M in / N out  → no soportado: el modelado lo desaconseja. Token waiting
+     *                   + warning en log.
+     *
+     * Garantía: en SPLIT, todos los siblings comparten parentTokenId == el id
+     * del token que se splitió. En JOIN, esa relación se usa para identificar
+     * "mi grupo" y no confundirme con tokens de otros splits concurrentes.
+     */
+    private void handleParallelGateway(ProcessInstance instance, Token token,
+                                        ProcessDefinition.FlowElement gateway,
+                                        ProcessDefinition def, UUID userId) {
+        List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(gateway.id());
+        List<ProcessDefinition.SequenceFlow> incoming = def.incomingFlows(gateway.id());
+        OffsetDateTime now = OffsetDateTime.now();
+
+        if (outgoing.size() > 1 && incoming.size() <= 1) {
+            // ── SPLIT ────────────────────────────────────────────────────────
+            token.setLifecycle("consumed");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            audit(instance, "gateway.split", gateway.id(), token.getId(), userId, Map.of(
+                "gatewayCode", gateway.code(),
+                "branches", outgoing.size()
+            ));
+            for (ProcessDefinition.SequenceFlow sf : outgoing) {
+                Token child = newToken(instance, sf.targetId(), token.getId());
+                tokenRepo.save(child);
+                ProcessDefinition.FlowElement target = def.findElementById(sf.targetId());
+                audit(instance, "token.entered", sf.targetId(), child.getId(), userId, Map.of(
+                    "elementCode", target != null ? target.code() : "?",
+                    "elementType", target != null ? target.type() : "?",
+                    "fromSplit", gateway.code()
+                ));
+                advanceToken(instance, child, def, userId);
+            }
+            return;
+        }
+
+        if (incoming.size() > 1 && outgoing.size() == 1) {
+            // ── JOIN ─────────────────────────────────────────────────────────
+            token.setLifecycle("waiting");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            audit(instance, "gateway.join.arrived", gateway.id(), token.getId(), userId, Map.of(
+                "gatewayCode", gateway.code()
+            ));
+
+            UUID myParent = token.getParentTokenId();
+            List<Token> arrived = tokenRepo.findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
+                instance.getId(), gateway.id(), "waiting");
+            List<Token> siblings = arrived.stream()
+                .filter(t -> Objects.equals(t.getParentTokenId(), myParent))
+                .toList();
+
+            if (siblings.size() < incoming.size()) {
+                log.debug("parallel_gateway JOIN {} — waiting siblings: {}/{}",
+                    gateway.code(), siblings.size(), incoming.size());
+                return; // esperar más
+            }
+
+            // Todos llegaron — consume siblings + emit nuevo token en outgoing
+            for (Token sib : siblings) {
+                sib.setLifecycle("consumed");
+                sib.setUpdatedAt(now);
+                tokenRepo.save(sib);
+            }
+
+            // grandparent restaura el nivel de paralelismo anterior al SPLIT
+            UUID grandparent = myParent == null ? null
+                : tokenRepo.findById(myParent).map(Token::getParentTokenId).orElse(null);
+
+            audit(instance, "gateway.join.completed", gateway.id(), null, userId, Map.of(
+                "gatewayCode", gateway.code(),
+                "branchesJoined", siblings.size()
+            ));
+
+            ProcessDefinition.SequenceFlow out = outgoing.get(0);
+            Token outToken = newToken(instance, out.targetId(), grandparent);
+            tokenRepo.save(outToken);
+            ProcessDefinition.FlowElement target = def.findElementById(out.targetId());
+            audit(instance, "token.entered", out.targetId(), outToken.getId(), userId, Map.of(
+                "elementCode", target != null ? target.code() : "?",
+                "elementType", target != null ? target.type() : "?",
+                "fromJoin", gateway.code()
+            ));
+            advanceToken(instance, outToken, def, userId);
+            return;
+        }
+
+        if (outgoing.size() == 1 && incoming.size() <= 1) {
+            // ── passthrough degenerado ───────────────────────────────────────
+            log.debug("parallel_gateway {} is 1-in 1-out (passthrough)", gateway.code());
+            consumeAndMoveToNext(instance, token, gateway, def, userId);
+            return;
+        }
+
+        // M-in N-out: no soportado en MVP — bloqueamos el token
+        log.warn("parallel_gateway {} has unsupported shape in={} out={} — token blocked",
+            gateway.code(), incoming.size(), outgoing.size());
+        token.setLifecycle("waiting");
+        tokenRepo.save(token);
+        audit(instance, "gateway.unsupported_shape", gateway.id(), token.getId(), userId, Map.of(
+            "gatewayCode", gateway.code(),
+            "incoming", incoming.size(),
+            "outgoing", outgoing.size()
+        ));
+    }
+
+    // ─── intermediate_event (A2 — timer + message + signal) ─────────────────
+
+    /**
+     * Maneja intermediate_event. Dispatch por subtype en config:
+     *   { "timer":   { "delaySeconds": 5 } }                    → A2 timer
+     *   { "message": { "messageCode": "x", "correlationKey": "${var}" } } → A2 message
+     *   { "signal":  { "signalCode": "y" } }                    → A2 signal
+     *
+     * Si falta cualquier subtype reconocido → passthrough (avanza como nodo
+     * normal) para no bloquear procesos con placeholder events.
+     *
+     * El correlationKey de message es opcional: puede ser literal (ej "X42")
+     * o JEXL expr `${varName}` que se evalúa contra las variables de la
+     * processinstance al momento de crear la correlation.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleIntermediateEvent(ProcessInstance instance, Token token,
+                                          ProcessDefinition.FlowElement event,
+                                          ProcessDefinition def, UUID userId) {
+        Map<String, Object> cfg = event.config();
+        if (cfg != null && cfg.get("timer") instanceof Map) {
+            handleTimerEvent(instance, token, event, (Map<String, Object>) cfg.get("timer"), userId);
+            return;
+        }
+        if (cfg != null && cfg.get("message") instanceof Map) {
+            handleMessageEvent(instance, token, event, (Map<String, Object>) cfg.get("message"), userId);
+            return;
+        }
+        if (cfg != null && cfg.get("signal") instanceof Map) {
+            handleSignalEvent(instance, token, event, (Map<String, Object>) cfg.get("signal"), userId);
+            return;
+        }
+
+        log.warn("intermediate_event '{}' has no recognized subtype config — passthrough",
+            event.code());
+        audit(instance, "intermediate_event.passthrough", event.id(), token.getId(), userId,
+            Map.of("elementCode", event.code()));
+        consumeAndMoveToNext(instance, token, event, def, userId);
+    }
+
+    private void handleTimerEvent(ProcessInstance instance, Token token,
+                                   ProcessDefinition.FlowElement event,
+                                   Map<String, Object> timerCfg, UUID userId) {
+        long delaySeconds;
+        Object delayObj = timerCfg.get("delaySeconds");
+        if (delayObj instanceof Number n) {
+            delaySeconds = n.longValue();
+        } else {
+            try {
+                delaySeconds = Long.parseLong(String.valueOf(delayObj));
+            } catch (NumberFormatException e) {
+                log.error("Invalid delaySeconds in timer config of {}: {}", event.code(), delayObj);
+                token.setLifecycle("waiting");
+                tokenRepo.save(token);
+                audit(instance, "intermediate_event.config_error", event.id(), token.getId(), userId,
+                    Map.of("elementCode", event.code(), "delayRaw", String.valueOf(delayObj)));
+                return;
+            }
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime fireAt = now.plusSeconds(delaySeconds);
+
+        token.setLifecycle("waiting");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        JobExecutor job = new JobExecutor();
+        job.setId(UUID.randomUUID());
+        job.setTenantId(instance.getTenantId());
+        job.setProcessinstanceId(instance.getId());
+        job.setTokenId(token.getId());
+        job.setJobType("timer");
+        job.setFireAt(fireAt);
+        job.setConfig(Map.of(
+            "elementId", event.id().toString(),
+            "elementCode", event.code(),
+            "delaySeconds", delaySeconds
+        ));
+        job.setLifecycle("scheduled");
+        job.setRetries(0);
+        job.setMaxRetries(3);
+        job.setStateId(DEFAULT_STATE_ACTIVE);
+        job.setCreatedAt(now);
+        job.setUpdatedAt(now);
+        jobRepo.save(job);
+
+        audit(instance, "timer.scheduled", event.id(), token.getId(), userId, Map.of(
+            "elementCode", event.code(),
+            "jobId", job.getId().toString(),
+            "fireAt", fireAt.toString(),
+            "delaySeconds", delaySeconds
+        ));
+        log.info("intermediate_event '{}' scheduled timer job {} fireAt={}",
+            event.code(), job.getId(), fireAt);
+    }
+
+    private void handleMessageEvent(ProcessInstance instance, Token token,
+                                     ProcessDefinition.FlowElement event,
+                                     Map<String, Object> msgCfg, UUID userId) {
+        String messageCode = stringOr(msgCfg.get("messageCode"), null);
+        if (messageCode == null || messageCode.isBlank()) {
+            log.error("intermediate_event '{}' message config without messageCode", event.code());
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            audit(instance, "intermediate_event.config_error", event.id(), token.getId(), userId,
+                Map.of("elementCode", event.code(), "reason", "missing messageCode"));
+            return;
+        }
+
+        // correlationKey opcional: literal string o `${varName}` JEXL expr.
+        String rawKey = stringOr(msgCfg.get("correlationKey"), "");
+        String resolvedKey = resolveExpression(rawKey, currentVariablesAsMap(instance));
+        if (resolvedKey == null || resolvedKey.isBlank()) {
+            // sin correlationKey, queda como wildcard "*" — primer correlate matcheará
+            resolvedKey = "*";
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        token.setLifecycle("waiting");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        MessageCorrelation mc = new MessageCorrelation();
+        mc.setId(UUID.randomUUID());
+        mc.setTenantId(instance.getTenantId());
+        mc.setProcessinstanceId(instance.getId());
+        mc.setTokenId(token.getId());
+        mc.setMessagedefId(MessageCorrelation.messageRefId(messageCode));
+        mc.setCorrelationKey(resolvedKey);
+        mc.setLifecycle("waiting");
+        mc.setStateId(DEFAULT_STATE_ACTIVE);
+        mc.setCreatedAt(now);
+        mc.setUpdatedAt(now);
+        msgCorrRepo.save(mc);
+
+        audit(instance, "message.subscribed", event.id(), token.getId(), userId, Map.of(
+            "elementCode", event.code(),
+            "messageCode", messageCode,
+            "correlationKey", resolvedKey,
+            "correlationId", mc.getId().toString()
+        ));
+        log.info("intermediate_event '{}' waiting for message '{}' (key={})",
+            event.code(), messageCode, resolvedKey);
+    }
+
+    private void handleSignalEvent(ProcessInstance instance, Token token,
+                                    ProcessDefinition.FlowElement event,
+                                    Map<String, Object> sigCfg, UUID userId) {
+        String signalCode = stringOr(sigCfg.get("signalCode"), null);
+        if (signalCode == null || signalCode.isBlank()) {
+            log.error("intermediate_event '{}' signal config without signalCode", event.code());
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            audit(instance, "intermediate_event.config_error", event.id(), token.getId(), userId,
+                Map.of("elementCode", event.code(), "reason", "missing signalCode"));
+            return;
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        token.setLifecycle("waiting");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        MessageCorrelation mc = new MessageCorrelation();
+        mc.setId(UUID.randomUUID());
+        mc.setTenantId(instance.getTenantId());
+        mc.setProcessinstanceId(instance.getId());
+        mc.setTokenId(token.getId());
+        mc.setMessagedefId(MessageCorrelation.signalRefId(signalCode));
+        mc.setCorrelationKey(MessageCorrelation.BROADCAST_KEY);
+        mc.setLifecycle("waiting");
+        mc.setStateId(DEFAULT_STATE_ACTIVE);
+        mc.setCreatedAt(now);
+        mc.setUpdatedAt(now);
+        msgCorrRepo.save(mc);
+
+        audit(instance, "signal.subscribed", event.id(), token.getId(), userId, Map.of(
+            "elementCode", event.code(),
+            "signalCode", signalCode,
+            "correlationId", mc.getId().toString()
+        ));
+        log.info("intermediate_event '{}' subscribed to signal '{}'",
+            event.code(), signalCode);
+    }
+
+    /**
+     * Correlate un mensaje entrante con el primer token waiting que matchee
+     * (messagedef + correlationKey). Devuelve el número de tokens reactivados.
+     *
+     * Si la lista de matching correlations es vacía, devuelve 0 — el caller
+     * (controller) puede decidir si es 404 o 200 con counter=0.
+     *
+     * Payload se merge en variables del processinstance antes de avanzar.
+     */
+    @Transactional
+    public int correlateMessage(String messageCode, String correlationKey,
+                                 Map<String, Object> payload) {
+        if (messageCode == null || messageCode.isBlank()) return 0;
+        UUID msgRefId = MessageCorrelation.messageRefId(messageCode);
+
+        List<MessageCorrelation> matches = msgCorrRepo
+            .findByMessagedefIdAndCorrelationKeyAndLifecycle(msgRefId, correlationKey, "waiting");
+
+        // Fallback: si no hubo match exacto, buscamos correlations con wildcard "*"
+        if (matches.isEmpty() && !"*".equals(correlationKey)) {
+            matches = msgCorrRepo
+                .findByMessagedefIdAndCorrelationKeyAndLifecycle(msgRefId, "*", "waiting");
+        }
+
+        if (matches.isEmpty()) {
+            log.info("correlateMessage: no match for messageCode={} correlationKey={}",
+                messageCode, correlationKey);
+            return 0;
+        }
+
+        // Reactivar SOLO el primero (semántica point-to-point típica)
+        MessageCorrelation mc = matches.get(0);
+        return advanceFromCorrelation(mc, payload, "message.received") ? 1 : 0;
+    }
+
+    /**
+     * Broadcast un signal a TODOS los tokens waiting por ese signalCode.
+     * Devuelve el número de tokens reactivados.
+     */
+    @Transactional
+    public int broadcastSignal(String signalCode, Map<String, Object> payload) {
+        if (signalCode == null || signalCode.isBlank()) return 0;
+        UUID sigRefId = MessageCorrelation.signalRefId(signalCode);
+        List<MessageCorrelation> matches = msgCorrRepo
+            .findByMessagedefIdAndLifecycle(sigRefId, "waiting");
+        if (matches.isEmpty()) {
+            log.info("broadcastSignal: no listener for signalCode={}", signalCode);
+            return 0;
+        }
+        int reactivated = 0;
+        for (MessageCorrelation mc : matches) {
+            if (advanceFromCorrelation(mc, payload, "signal.received")) reactivated++;
+        }
+        log.info("broadcastSignal: signalCode={} reactivated {}/{}",
+            signalCode, reactivated, matches.size());
+        return reactivated;
+    }
+
+    /**
+     * Helper: marca correlation matched, merge payload en variables, reactiva
+     * token y avanza al siguiente. Idempotente vía chequeo de lifecycle.
+     */
+    private boolean advanceFromCorrelation(MessageCorrelation mc,
+                                            Map<String, Object> payload,
+                                            String auditEvent) {
+        OffsetDateTime now = OffsetDateTime.now();
+        mc.setLifecycle("matched");
+        mc.setMatchedAt(now);
+        mc.setMatchedPayload(payload);
+        mc.setUpdatedAt(now);
+        msgCorrRepo.save(mc);
+
+        ProcessInstance instance = instanceRepo.findById(mc.getProcessinstanceId()).orElse(null);
+        if (instance == null) {
+            log.warn("advanceFromCorrelation: instance gone for correlation {}", mc.getId());
+            return false;
+        }
+        if (!"active".equals(instance.getLifecycle())) {
+            log.info("advanceFromCorrelation: instance {} no longer active ({})",
+                instance.getId(), instance.getLifecycle());
+            return false;
+        }
+        Token token = tokenRepo.findById(mc.getTokenId()).orElse(null);
+        if (token == null || !"waiting".equals(token.getLifecycle())) {
+            log.warn("advanceFromCorrelation: token gone or not waiting (id={})", mc.getTokenId());
+            return false;
+        }
+
+        // Merge payload en variables (si vino payload non-null)
+        if (payload != null && !payload.isEmpty()) {
+            for (Map.Entry<String, Object> e : payload.entrySet()) {
+                setVariable(instance, e.getKey(), e.getValue());
+            }
+        }
+
+        token.setLifecycle("active");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
+        if (current == null) {
+            log.error("advanceFromCorrelation: current element gone for token {}", token.getId());
+            return false;
+        }
+
+        audit(instance, auditEvent, current.id(), token.getId(), null, Map.of(
+            "elementCode", current.code(),
+            "correlationId", mc.getId().toString()
+        ));
+        consumeAndMoveToNext(instance, token, current, def, null);
+        return true;
+    }
+
+    // Helpers internos al event handling
+    private static String stringOr(Object o, String dflt) {
+        return o == null ? dflt : String.valueOf(o);
+    }
+
+    /**
+     * Resuelve una expresión `${var}` contra el mapa de variables. Si no
+     * empieza por `${`, se devuelve tal cual (literal). Si la evaluación
+     * falla, devuelve el string raw (no rompe el flow).
+     */
+    private String resolveExpression(String raw, Map<String, Object> vars) {
+        if (raw == null) return null;
+        if (!raw.startsWith("${") || !raw.endsWith("}")) return raw;
+        String script = raw.substring(2, raw.length() - 1);
+        try {
+            JexlContext ctx = new MapContext();
+            for (Map.Entry<String, Object> e : vars.entrySet()) {
+                ctx.set(e.getKey(), e.getValue());
+            }
+            Object result = jexl.createScript(script).execute(ctx);
+            return result == null ? null : String.valueOf(result);
+        } catch (Exception e) {
+            log.warn("resolveExpression failed for '{}': {}", raw, e.getMessage());
+            return raw;
+        }
+    }
+
+    /**
+     * Dispara un job timer vencido. Llamado por JobExecutorWorker.
+     * Reactiva el token (waiting → active) y lo avanza al siguiente flow
+     * element. Idempotente vía el chequeo de lifecycle del job.
+     */
+    @Transactional
+    public void fireTimerJob(UUID jobId) {
+        JobExecutor job = jobRepo.findById(jobId).orElse(null);
+        if (job == null) {
+            log.warn("fireTimerJob: job {} not found", jobId);
+            return;
+        }
+        if (!"scheduled".equals(job.getLifecycle())) {
+            log.debug("fireTimerJob: job {} not scheduled (lifecycle={}) — skip",
+                jobId, job.getLifecycle());
+            return;
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        job.setLifecycle("firing");
+        job.setUpdatedAt(now);
+        jobRepo.save(job);
+
+        try {
+            ProcessInstance instance = instanceRepo.findById(job.getProcessinstanceId()).orElse(null);
+            if (instance == null) {
+                throw new IllegalStateException("Process instance gone: " + job.getProcessinstanceId());
+            }
+            if (!"active".equals(instance.getLifecycle())) {
+                log.info("fireTimerJob: instance {} no longer active ({}) — cancel job",
+                    instance.getId(), instance.getLifecycle());
+                job.setLifecycle("cancelled");
+                job.setFiredAt(now);
+                job.setUpdatedAt(now);
+                jobRepo.save(job);
+                return;
+            }
+            Token token = tokenRepo.findById(job.getTokenId()).orElse(null);
+            if (token == null || !"waiting".equals(token.getLifecycle())) {
+                log.warn("fireTimerJob: token {} gone or no longer waiting — cancel job",
+                    job.getTokenId());
+                job.setLifecycle("cancelled");
+                job.setFiredAt(now);
+                job.setUpdatedAt(now);
+                jobRepo.save(job);
+                return;
+            }
+
+            // Reactivar token y avanzar al siguiente
+            token.setLifecycle("active");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+
+            ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+            ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
+            if (current != null) {
+                audit(instance, "timer.fired", current.id(), token.getId(), null, Map.of(
+                    "elementCode", current.code(),
+                    "jobId", job.getId().toString()
+                ));
+                consumeAndMoveToNext(instance, token, current, def, null);
+            }
+
+            job.setLifecycle("fired");
+            job.setFiredAt(OffsetDateTime.now());
+            job.setUpdatedAt(OffsetDateTime.now());
+            jobRepo.save(job);
+
+        } catch (Exception ex) {
+            log.error("fireTimerJob: failed for job {}", jobId, ex);
+            job.setRetries(job.getRetries() + 1);
+            if (job.getRetries() >= job.getMaxRetries()) {
+                job.setLifecycle("failed");
+                job.setLastError(ex.getMessage());
+            } else {
+                // Volver a 'scheduled' con backoff exponencial (60s * 2^retries)
+                job.setLifecycle("scheduled");
+                job.setFireAt(OffsetDateTime.now().plusSeconds(60L * (1L << job.getRetries())));
+                job.setLastError(ex.getMessage());
+            }
+            job.setUpdatedAt(OffsetDateTime.now());
+            jobRepo.save(job);
+        }
     }
 
     /** JEXL eval. Soporta `${motivo == 'UsuPte'}` o `motivo == 'UsuPte'` (sin wrap). */

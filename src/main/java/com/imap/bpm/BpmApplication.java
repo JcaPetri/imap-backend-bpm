@@ -2,6 +2,7 @@ package com.imap.bpm;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * IMAP BPM Microservice — entry point.
@@ -21,6 +22,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
  * Puerto: 8093 | Context path: /imap/bpm | Schema postgres: bpm
  */
 @SpringBootApplication
+@EnableScheduling   // habilita JobExecutorWorker (A2 — timers via @Scheduled)
 public class BpmApplication {
 
     public static void main(String[] args) {

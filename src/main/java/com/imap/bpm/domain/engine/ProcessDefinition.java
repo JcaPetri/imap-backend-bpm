@@ -47,6 +47,14 @@ public record ProcessDefinition(
             .toList();
     }
 
+    /** Sequence flows entrantes a un flowelement (uso: detectar JOIN gateways). */
+    public List<SequenceFlow> incomingFlows(UUID targetId) {
+        return sequenceFlows.stream()
+            .filter(sf -> targetId.equals(sf.targetId()))
+            .sorted(java.util.Comparator.comparingInt(SequenceFlow::sortOrder))
+            .toList();
+    }
+
     public record FlowElement(
         UUID id, String code, String type, String name,
         Map<String, Object> config, int sortOrder
