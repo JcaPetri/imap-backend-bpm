@@ -27,16 +27,20 @@ import java.util.*;
  *   - parallel_gateway  → SPLIT (1-in N-out: emite N child tokens) +
  *                         JOIN  (M-in 1-out: espera todos siblings con mismo
  *                                parent_token_id antes de avanzar al outgoing)
- *   - intermediate_event (timer): A2 — programa job_executor con fire_at,
- *                         token.waiting, JobExecutorWorker @Scheduled lo
- *                         dispara al vencer y reactiva el token.
+ *   - intermediate_event (timer/message/signal): A2 — timer programa job
+ *                         vía JobExecutor; message/signal subscribe correlations
+ *                         que reactivan tokens al recibir POST a /messages/
+ *                         correlate o /signals/broadcast.
+ *   - sub_process       (B1 — call activity): spawnea child ProcessInstance
+ *                         con parent_instance_id + parent_token_id; al
+ *                         completar el child, copia returnVariables al parent
+ *                         y reactiva el token waiting en el sub_process.
  *
  * NO soportado todavía (backlog Paso 07+):
- *   - intermediate_event (message/signal — solo timer hoy)
- *   - sub_process       (call activity)
  *   - boundary_event    (timer/error/escalation)
  *   - compensation
  *   - DMN engine (decision tables)
+ *   - sub_process fire-and-forget (waitForCompletion=false)
  */
 @Service
 public class ProcessEngine {
@@ -101,8 +105,26 @@ public class ProcessEngine {
                                         String bearerToken,
                                         UUID tenantId,
                                         UUID userId) {
+        return startProcessInternal(processVersionId, payload, bearerToken, tenantId, userId,
+            null, null);
+    }
+
+    /**
+     * Variante para spawn de sub_process (B1 — call activity).
+     * Si parentInstanceId / parentTokenId son non-null, queda registrada como
+     * child en bpm_pro_processinstance_tbl. Al completar (handleEndEvent),
+     * el motor notifica al parent y avanza el token waiting.
+     */
+    private ProcessInstance startProcessInternal(UUID processVersionId,
+                                                  Map<String, Object> payload,
+                                                  String bearerToken,
+                                                  UUID tenantId,
+                                                  UUID userId,
+                                                  UUID parentInstanceId,
+                                                  UUID parentTokenId) {
         ProcessDefinition def = loader.load(processVersionId, bearerToken, tenantId);
-        log.info("Starting process {} (v{}) for user {}", def.processdefCode(), def.version(), userId);
+        log.info("Starting process {} (v{}) for user {} parent={}",
+            def.processdefCode(), def.version(), userId, parentInstanceId);
 
         // 1. Find start_event
         ProcessDefinition.FlowElement start = def.flowElements().stream()
@@ -111,13 +133,17 @@ public class ProcessEngine {
             .orElseThrow(() -> new IllegalStateException(
                 "No start_event in processVersion " + processVersionId));
 
-        // 2. Crear ProcessInstance
+        // 2. Crear ProcessInstance (con parent refs si es sub_process)
         ProcessInstance instance = newInstance(def, tenantId, userId);
+        instance.setParentInstanceId(parentInstanceId);
+        instance.setParentTokenId(parentTokenId);
         instanceRepo.save(instance);
-        audit(instance, "instance.started", null, null, userId, Map.of(
-            "processCode", def.processdefCode(),
-            "version", def.version()
-        ));
+        Map<String, Object> startedAuditData = new LinkedHashMap<>();
+        startedAuditData.put("processCode", def.processdefCode());
+        startedAuditData.put("version", def.version());
+        if (parentInstanceId != null) startedAuditData.put("parentInstanceId", parentInstanceId.toString());
+        if (parentTokenId != null)    startedAuditData.put("parentTokenId", parentTokenId.toString());
+        audit(instance, "instance.started", null, null, userId, startedAuditData);
 
         // 3. Persistir variables iniciales del payload
         if (payload != null) {
@@ -242,6 +268,10 @@ public class ProcessEngine {
                 handleIntermediateEvent(instance, token, current, def, userId);
                 break;
 
+            case "sub_process":
+                handleSubProcess(instance, token, current, def, userId);
+                break;
+
             default:
                 log.warn("Unsupported flow_element type '{}' — token blocked at {}",
                     current.type(), current.code());
@@ -302,9 +332,16 @@ public class ProcessEngine {
             instance.setUpdatedAt(OffsetDateTime.now());
             instanceRepo.save(instance);
             audit(instance, "instance.ended", null, null, userId,
-                Map.of("result", endEvent.config().getOrDefault("result", "default"),
+                Map.of("result", endEvent.config() == null ? "default"
+                       : endEvent.config().getOrDefault("result", "default"),
                        "endEventCode", endEvent.code()));
             log.info("ProcessInstance {} completed via {}", instance.getId(), endEvent.code());
+
+            // B1 — si es child de un sub_process, notificar al parent para
+            // que avance el token waiting en el sub_process flow_element.
+            if (instance.getParentInstanceId() != null && instance.getParentTokenId() != null) {
+                notifyParentOfSubprocessCompletion(instance, userId);
+            }
         }
     }
 
@@ -699,6 +736,194 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' subscribed to signal '{}'",
             event.code(), signalCode);
+    }
+
+    // ─── sub_process (B1 — call activity) ──────────────────────────────────
+
+    /**
+     * Maneja un flow_element `sub_process` (call activity).
+     *
+     * Config esperada (en bpm_pro_flowelement_config como JSON):
+     *   {
+     *     "callActivity": {
+     *       "calledProcessversionId": "<uuid>",          // MVP: requerido
+     *       "passVariables":   ["userId", "email"],       // opcional
+     *       "returnVariables": ["validationResult"]       // opcional
+     *     }
+     *   }
+     *
+     * Flujo:
+     *   1. Token del parent → waiting
+     *   2. Construir payload con las `passVariables` snapshotted del parent
+     *   3. Spawn child ProcessInstance via startProcessInternal con parent refs
+     *   4. Audit `subprocess.spawned`
+     *
+     * El child puede completarse instantáneamente dentro de la misma transacción
+     * (procesos de solo service_tasks+gateways) o quedar en wait state. En
+     * ambos casos el comportamiento es correcto: si completa instantáneo,
+     * handleEndEvent del child llama notifyParentOfSubprocessCompletion que
+     * reactiva el token del parent ya marcado waiting (sin race condition).
+     */
+    @SuppressWarnings("unchecked")
+    private void handleSubProcess(ProcessInstance instance, Token token,
+                                   ProcessDefinition.FlowElement subProcess,
+                                   ProcessDefinition def, UUID userId) {
+        Map<String, Object> cfg = subProcess.config();
+        Map<String, Object> callCfg = cfg == null ? null
+            : (Map<String, Object>) cfg.get("callActivity");
+
+        if (callCfg == null) {
+            log.warn("sub_process '{}' has no callActivity config — passthrough",
+                subProcess.code());
+            audit(instance, "subprocess.passthrough", subProcess.id(), token.getId(), userId,
+                Map.of("elementCode", subProcess.code()));
+            consumeAndMoveToNext(instance, token, subProcess, def, userId);
+            return;
+        }
+
+        String calledVerId = stringOr(callCfg.get("calledProcessversionId"), null);
+        if (calledVerId == null || calledVerId.isBlank()) {
+            log.error("sub_process '{}' callActivity missing calledProcessversionId",
+                subProcess.code());
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            audit(instance, "subprocess.config_error", subProcess.id(), token.getId(), userId,
+                Map.of("elementCode", subProcess.code(),
+                       "reason", "missing calledProcessversionId"));
+            return;
+        }
+
+        UUID calledProcessVersionId;
+        try {
+            calledProcessVersionId = UUID.fromString(calledVerId);
+        } catch (IllegalArgumentException e) {
+            log.error("sub_process '{}' calledProcessversionId not a UUID: {}",
+                subProcess.code(), calledVerId);
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            audit(instance, "subprocess.config_error", subProcess.id(), token.getId(), userId,
+                Map.of("elementCode", subProcess.code(),
+                       "calledProcessversionId", calledVerId,
+                       "reason", "not a valid UUID"));
+            return;
+        }
+
+        // Snapshot vars del parent → payload para el child
+        Map<String, Object> parentVars = currentVariablesAsMap(instance);
+        Map<String, Object> childPayload = new LinkedHashMap<>();
+        Object passVarsObj = callCfg.get("passVariables");
+        if (passVarsObj instanceof List<?> list) {
+            for (Object v : list) {
+                String name = String.valueOf(v);
+                if (parentVars.containsKey(name)) {
+                    childPayload.put(name, parentVars.get(name));
+                }
+            }
+        }
+
+        // Token del parent: waiting hasta que el child complete
+        OffsetDateTime now = OffsetDateTime.now();
+        token.setLifecycle("waiting");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        audit(instance, "subprocess.spawning", subProcess.id(), token.getId(), userId, Map.of(
+            "elementCode", subProcess.code(),
+            "calledProcessversionId", calledProcessVersionId.toString(),
+            "passVariables", childPayload.keySet()
+        ));
+
+        // Spawn child (puede completarse instantáneo dentro de esta transaction)
+        ProcessInstance child;
+        try {
+            child = startProcessInternal(calledProcessVersionId, childPayload,
+                null /*bearer*/, instance.getTenantId(), userId,
+                instance.getId(), token.getId());
+        } catch (Exception ex) {
+            log.error("sub_process '{}' spawn failed", subProcess.code(), ex);
+            // Reactivar token y pasar al siguiente igual (fallback graceful)
+            token.setLifecycle("active");
+            token.setUpdatedAt(OffsetDateTime.now());
+            tokenRepo.save(token);
+            audit(instance, "subprocess.spawn_failed", subProcess.id(), token.getId(), userId,
+                Map.of("elementCode", subProcess.code(), "error", ex.getMessage()));
+            consumeAndMoveToNext(instance, token, subProcess, def, userId);
+            return;
+        }
+
+        audit(instance, "subprocess.spawned", subProcess.id(), token.getId(), userId, Map.of(
+            "elementCode", subProcess.code(),
+            "childInstanceId", child.getId().toString(),
+            "childLifecycle", child.getLifecycle()
+        ));
+        log.info("sub_process '{}' spawned child {} (lifecycle={})",
+            subProcess.code(), child.getId(), child.getLifecycle());
+    }
+
+    /**
+     * Llamado desde handleEndEvent del child cuando termina. Copia las
+     * `returnVariables` declaradas en el sub_process flow_element del parent
+     * desde el child al parent, reactiva el token del parent y avanza.
+     */
+    @SuppressWarnings("unchecked")
+    private void notifyParentOfSubprocessCompletion(ProcessInstance child, UUID userId) {
+        UUID parentInstanceId = child.getParentInstanceId();
+        UUID parentTokenId    = child.getParentTokenId();
+        ProcessInstance parent = instanceRepo.findById(parentInstanceId).orElse(null);
+        if (parent == null) {
+            log.warn("notifyParent: parent instance {} not found", parentInstanceId);
+            return;
+        }
+        if (!"active".equals(parent.getLifecycle())) {
+            log.info("notifyParent: parent {} no longer active ({})",
+                parent.getId(), parent.getLifecycle());
+            return;
+        }
+        Token parentToken = tokenRepo.findById(parentTokenId).orElse(null);
+        if (parentToken == null || !"waiting".equals(parentToken.getLifecycle())) {
+            log.warn("notifyParent: parent token {} gone or not waiting", parentTokenId);
+            return;
+        }
+
+        ProcessDefinition parentDef = loader.load(parent.getProcessversionId(),
+            null, parent.getTenantId());
+        ProcessDefinition.FlowElement subProcessElement =
+            parentDef.findElementById(parentToken.getCurrentElementId());
+        if (subProcessElement == null) {
+            log.error("notifyParent: parent sub_process element gone");
+            return;
+        }
+
+        // Copia returnVariables del child al parent
+        Map<String, Object> cfg = subProcessElement.config();
+        Map<String, Object> callCfg = cfg == null ? null
+            : (Map<String, Object>) cfg.get("callActivity");
+        if (callCfg != null && callCfg.get("returnVariables") instanceof List<?> retList) {
+            Map<String, Object> childVars = currentVariablesAsMap(child);
+            int copied = 0;
+            for (Object v : retList) {
+                String name = String.valueOf(v);
+                if (childVars.containsKey(name)) {
+                    setVariable(parent, name, childVars.get(name));
+                    copied++;
+                }
+            }
+            log.debug("notifyParent: copied {} returnVariables from child {} to parent {}",
+                copied, child.getId(), parent.getId());
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        parentToken.setLifecycle("active");
+        parentToken.setUpdatedAt(now);
+        tokenRepo.save(parentToken);
+        audit(parent, "subprocess.completed", subProcessElement.id(), parentToken.getId(), userId,
+            Map.of(
+                "elementCode", subProcessElement.code(),
+                "childInstanceId", child.getId().toString(),
+                "childLifecycle", child.getLifecycle()
+            ));
+
+        consumeAndMoveToNext(parent, parentToken, subProcessElement, parentDef, userId);
     }
 
     /**

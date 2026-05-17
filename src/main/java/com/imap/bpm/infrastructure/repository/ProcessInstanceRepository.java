@@ -9,4 +9,5 @@ import java.util.UUID;
 public interface ProcessInstanceRepository extends JpaRepository<ProcessInstance, UUID> {
     List<ProcessInstance> findByTenantIdAndLifecycle(UUID tenantId, String lifecycle);
     List<ProcessInstance> findByProcessdefIdAndLifecycle(UUID processdefId, String lifecycle);
+    List<ProcessInstance> findByParentInstanceId(UUID parentInstanceId);
 }

@@ -36,6 +36,10 @@ public class ProcessInstance {
     @Column(name = "parent_instance_id")
     private UUID parentInstanceId;
 
+    /** B1 — token específico del parent que está waiting en el sub_process. */
+    @Column(name = "parent_token_id")
+    private UUID parentTokenId;
+
     @Column(name = "lifecycle", nullable = false, length = 20)
     private String lifecycle;       // 'active' | 'completed' | 'cancelled' | 'failed' | 'suspended'
 
@@ -76,6 +80,8 @@ public class ProcessInstance {
     public void setProcessversionId(UUID id) { this.processversionId = id; }
     public UUID getParentInstanceId()        { return parentInstanceId; }
     public void setParentInstanceId(UUID id) { this.parentInstanceId = id; }
+    public UUID getParentTokenId()           { return parentTokenId; }
+    public void setParentTokenId(UUID id)    { this.parentTokenId = id; }
     public String getLifecycle()             { return lifecycle; }
     public void setLifecycle(String s)       { this.lifecycle = s; }
     public OffsetDateTime getStartedAt()     { return startedAt; }
