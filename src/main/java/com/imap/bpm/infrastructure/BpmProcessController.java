@@ -17,6 +17,8 @@ import com.imap.bpm.infrastructure.security.UserContext;
 import com.imap.bpm.infrastructure.security.UserContextHolder;
 import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
 import com.imap.eav.engine.context.EavTenantSession;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
@@ -36,6 +38,8 @@ import java.util.*;
  *   POST /v1/bpm/messages/correlate                 → A2 — correlate message
  *   POST /v1/bpm/signals/broadcast                  → A2 — broadcast signal
  *   GET    /v1/bpm/processdef/{id}/instances        → admin: lista instances
+ *   GET    /v1/bpm/processdefs/summary              → admin: resumen por processdef
+ *   POST   /v1/bpm/instance/{id}/cancel             → admin: soft cancel (C1)
  *   DELETE /v1/bpm/instance/{id}                    → admin: cascade delete
  *
  * Por simplicidad MVP, el endpoint /start recibe el processVersionId directo
@@ -61,6 +65,9 @@ public class BpmProcessController {
     private final VariableRepository varRepo;
     private final JobExecutorRepository jobRepo;
     private final MessageCorrelationRepository msgCorrRepo;
+
+    @PersistenceContext
+    private EntityManager em;
 
     public BpmProcessController(ProcessEngine engine,
                                 TaskInstanceRepository taskRepo,
@@ -344,6 +351,87 @@ public class BpmProcessController {
         out.put("signalCode", signalCode);
         out.put("reactivatedTokens", reactivated);
         return out;
+    }
+
+    // ─── Admin: cancel instance (C1 — soft) ──────────────────────────────────
+
+    /**
+     * Cancel soft de una instance activa (C1): marca lifecycle='cancelled',
+     * mata tokens/tasks/jobs/correlations vivas, preserva audit log.
+     * Body opcional: {"reason": "..."}.
+     *
+     * Devuelve {id, lifecycle:"cancelled", reason, counts:{tokensCancelled, ...}}.
+     *
+     * 404 si instance no existe. 409 si ya no está en lifecycle=active.
+     */
+    @PostMapping("/instance/{instanceId}/cancel")
+    public ResponseEntity<Map<String, Object>> cancelInstance(
+            @PathVariable("instanceId") String instanceIdStr,
+            @RequestBody(required = false) Map<String, Object> body) {
+        UUID instanceId = UUID.fromString(instanceIdStr);
+        String reason = body == null ? null : (String) body.get("reason");
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+
+        try {
+            Map<String, Object> counts = engine.cancelInstance(instanceId, reason, userId);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("id", instanceIdStr);
+            out.put("lifecycle", "cancelled");
+            out.put("reason", reason);
+            out.put("counts", counts);
+            return ResponseEntity.ok(out);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        } catch (IllegalStateException e) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", "instance_not_active");
+            err.put("message", e.getMessage());
+            return ResponseEntity.status(409).body(err);
+        }
+    }
+
+    /**
+     * Resumen de processdefs activos en el tenant: cada processdef que tenga
+     * ≥1 instance + counts por lifecycle. Usa SQL nativo (group by) para
+     * eficiencia — vs cargar todas las instances en memoria.
+     *
+     * Útil para la ProcessAdminPage (C2): muestra cards con stats.
+     */
+    @GetMapping("/processdefs/summary")
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> processdefsSummary() {
+        tenantSession.applyToCurrentTransaction();
+        // Group by processdef_id + lifecycle. El processdef_code no vive
+        // acá (vive en system EAV), el frontend lo resuelve via system si
+        // necesita, o lo deja con el UUID.
+        List<Object[]> rows = em.createNativeQuery("""
+            SELECT CAST(processdef_id AS text) AS processdef_id,
+                   lifecycle,
+                   COUNT(*) AS total
+              FROM bpm.bpm_pro_processinstance_tbl
+             GROUP BY processdef_id, lifecycle
+             ORDER BY processdef_id, lifecycle
+            """).getResultList();
+
+        Map<String, Map<String, Object>> byDef = new LinkedHashMap<>();
+        for (Object[] r : rows) {
+            String defId = (String) r[0];
+            String lifecycle = (String) r[1];
+            long count = ((Number) r[2]).longValue();
+            Map<String, Object> entry = byDef.computeIfAbsent(defId, k -> {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("processdefId", k);
+                m.put("totalInstances", 0L);
+                m.put("byLifecycle", new LinkedHashMap<String, Long>());
+                return m;
+            });
+            @SuppressWarnings("unchecked")
+            Map<String, Long> lifecycleMap = (Map<String, Long>) entry.get("byLifecycle");
+            lifecycleMap.put(lifecycle, count);
+            entry.put("totalInstances", (Long) entry.get("totalInstances") + count);
+        }
+        return new ArrayList<>(byDef.values());
     }
 
     // ─── Admin: list + delete instance (cascade) ─────────────────────────────

@@ -5,6 +5,8 @@ import com.imap.bpm.infrastructure.entity.*;
 import com.imap.bpm.infrastructure.repository.*;
 import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
 import com.imap.eav.engine.context.EavTenantSession;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 import org.apache.commons.jexl3.JexlBuilder;
 import org.apache.commons.jexl3.JexlContext;
 import org.apache.commons.jexl3.JexlEngine;
@@ -78,6 +80,7 @@ public class ProcessEngine {
     private final EavTenantSession tenantSession;
     private final DecisionDefinitionLoader decisionLoader;
     private final DmnEvaluator dmnEvaluator;
+    private final MeterRegistry meterRegistry;
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
 
@@ -92,6 +95,7 @@ public class ProcessEngine {
                          EavTenantSession tenantSession,
                          DecisionDefinitionLoader decisionLoader,
                          DmnEvaluator dmnEvaluator,
+                         MeterRegistry meterRegistry,
                          ObjectMapper jackson) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
@@ -104,8 +108,22 @@ public class ProcessEngine {
         this.tenantSession = tenantSession;
         this.decisionLoader = decisionLoader;
         this.dmnEvaluator = dmnEvaluator;
+        this.meterRegistry = meterRegistry;
         this.jackson = jackson;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
+    }
+
+    // ─── Métricas Micrometer (C3) — helper para counters tag-by-processdef ──
+
+    private void metricInc(String name, ProcessDefinition def) {
+        String code = def == null ? "unknown" : def.processdefCode();
+        meterRegistry.counter(name, Tags.of("processdef", code == null ? "unknown" : code)).increment();
+    }
+    private void metricInc(String name, String processdefCode) {
+        meterRegistry.counter(name, Tags.of("processdef", processdefCode == null ? "unknown" : processdefCode)).increment();
+    }
+    private void metricInc(String name) {
+        meterRegistry.counter(name).increment();
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -187,6 +205,8 @@ public class ProcessEngine {
         // 5. Avanza hasta wait state o end
         advanceToken(instance, token, def, userId);
 
+        metricInc("bpm.instance.started", def);
+
         // Reload instance (puede haberse marcado completed durante advance)
         return instanceRepo.findById(instance.getId()).orElse(instance);
     }
@@ -227,6 +247,7 @@ public class ProcessEngine {
         }
         audit(instance, "task.completed", task.getFlowelementId(), task.getTokenId(), userId,
             Map.of("taskInstanceId", task.getId().toString()));
+        metricInc("bpm.task.completed");
 
         // B2 — cancelar boundary timers del token antes de avanzar (sino
         // disparan después de que la task ya está completa = bug).
@@ -386,6 +407,7 @@ public class ProcessEngine {
                        : endEvent.config().getOrDefault("result", "default"),
                        "endEventCode", endEvent.code()));
             log.info("ProcessInstance {} completed via {}", instance.getId(), endEvent.code());
+            metricInc("bpm.instance.ended");
 
             // B1 — si es child de un sub_process, notificar al parent para
             // que avance el token waiting en el sub_process flow_element.
@@ -446,6 +468,7 @@ public class ProcessEngine {
             form != null ? form.entityDefCode() : "none",
             task.getAssignedUserId(),
             boundariesScheduled);
+        metricInc("bpm.task.created");
     }
 
     // ─── boundary_event (B2 — interrupting timer sobre user_task) ───────────
@@ -592,7 +615,90 @@ public class ProcessEngine {
             "targetCode", chosen.targetCode(),
             "conditionExpr", chosen.conditionExpr() == null ? "(default)" : chosen.conditionExpr()
         ));
+        metricInc("bpm.gateway.exclusive");
         moveTokenToElement(instance, token, chosen.targetId(), def, userId);
+    }
+
+    // ─── cancel instance (C1 — soft cancel preservando audit) ────────────────
+
+    /**
+     * Cancela una instance activa: marca instance.lifecycle='cancelled',
+     * mata tokens vivos (active/waiting), cancela tasks vivas (created/
+     * assigned/in_progress), cancela jobs scheduled (boundaries + timers),
+     * marca correlations waiting como cancelled, audita el evento con
+     * reason opcional. Preserva audit log para compliance.
+     *
+     * Devuelve counts de qué actualizó. Lanza IllegalStateException si la
+     * instance no está en estado active (idempotencia).
+     */
+    @Transactional
+    public Map<String, Object> cancelInstance(UUID instanceId, String reason, UUID userId) {
+        tenantSession.applyToCurrentTransaction();
+        ProcessInstance instance = instanceRepo.findById(instanceId)
+            .orElseThrow(() -> new IllegalArgumentException("Instance not found: " + instanceId));
+        if (!"active".equals(instance.getLifecycle())) {
+            throw new IllegalStateException("Cannot cancel instance " + instanceId
+                + " — lifecycle is '" + instance.getLifecycle() + "' (must be 'active')");
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        int tokensCancelled = 0;
+        int tasksCancelled = 0;
+        int jobsCancelled = 0;
+        int corrsCancelled = 0;
+
+        // Tokens vivos → consumed (consideramos cancelled como subtipo de consumed)
+        for (Token t : tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+                instance.getId(), List.of("active", "waiting"))) {
+            t.setLifecycle("consumed");
+            t.setUpdatedAt(now);
+            tokenRepo.save(t);
+            tokensCancelled++;
+        }
+
+        // Tasks vivas → cancelled
+        for (TaskInstance task : taskRepo.findByProcessinstanceId(instance.getId())) {
+            if (List.of("created", "assigned", "in_progress").contains(task.getLifecycle())) {
+                task.setLifecycle("cancelled");
+                task.setUpdatedAt(now);
+                taskRepo.save(task);
+                tasksCancelled++;
+            }
+        }
+
+        // Jobs scheduled → cancelled (incluye boundary + intermediate timers)
+        for (JobExecutor job : jobRepo.findByProcessinstanceIdAndLifecycle(instance.getId(), "scheduled")) {
+            job.setLifecycle("cancelled");
+            job.setUpdatedAt(now);
+            jobRepo.save(job);
+            jobsCancelled++;
+        }
+
+        // Correlations waiting → cancelled
+        for (MessageCorrelation mc : msgCorrRepo.findByProcessinstanceIdAndLifecycle(instance.getId(), "waiting")) {
+            mc.setLifecycle("cancelled");
+            mc.setUpdatedAt(now);
+            msgCorrRepo.save(mc);
+            corrsCancelled++;
+        }
+
+        instance.setLifecycle("cancelled");
+        instance.setEndedAt(now);
+        instance.setUpdatedAt(now);
+        instanceRepo.save(instance);
+
+        Map<String, Object> auditData = new LinkedHashMap<>();
+        auditData.put("reason", reason == null ? "(no reason given)" : reason);
+        auditData.put("tokensCancelled", tokensCancelled);
+        auditData.put("tasksCancelled", tasksCancelled);
+        auditData.put("jobsCancelled", jobsCancelled);
+        auditData.put("correlationsCancelled", corrsCancelled);
+        audit(instance, "instance.cancelled", null, null, userId, auditData);
+        log.info("Instance {} cancelled (reason={}) — tokens={}, tasks={}, jobs={}, corrs={}",
+            instanceId, reason, tokensCancelled, tasksCancelled, jobsCancelled, corrsCancelled);
+        metricInc("bpm.instance.cancelled");
+
+        return auditData;
     }
 
     // ─── parallel_gateway (A1 — AND-split / AND-join) ────────────────────────
@@ -632,6 +738,7 @@ public class ProcessEngine {
                 "gatewayCode", gateway.code(),
                 "branches", outgoing.size()
             ));
+            metricInc("bpm.gateway.split");
             for (ProcessDefinition.SequenceFlow sf : outgoing) {
                 Token child = newToken(instance, sf.targetId(), token.getId());
                 tokenRepo.save(child);
@@ -683,6 +790,7 @@ public class ProcessEngine {
                 "gatewayCode", gateway.code(),
                 "branchesJoined", siblings.size()
             ));
+            metricInc("bpm.gateway.join");
 
             ProcessDefinition.SequenceFlow out = outgoing.get(0);
             Token outToken = newToken(instance, out.targetId(), grandparent);
@@ -811,6 +919,7 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' scheduled timer job {} fireAt={}",
             event.code(), job.getId(), fireAt);
+        metricInc("bpm.timer.scheduled");
     }
 
     private void handleMessageEvent(ProcessInstance instance, Token token,
@@ -860,6 +969,7 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' waiting for message '{}' (key={})",
             event.code(), messageCode, resolvedKey);
+        metricInc("bpm.message.subscribed");
     }
 
     private void handleSignalEvent(ProcessInstance instance, Token token,
@@ -900,6 +1010,7 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' subscribed to signal '{}'",
             event.code(), signalCode);
+        metricInc("bpm.signal.subscribed");
     }
 
     // ─── sub_process (B1 — call activity) ──────────────────────────────────
@@ -1022,6 +1133,7 @@ public class ProcessEngine {
         ));
         log.info("sub_process '{}' spawned child {} (lifecycle={})",
             subProcess.code(), child.getId(), child.getLifecycle());
+        metricInc("bpm.subprocess.spawned");
     }
 
     /**
@@ -1185,6 +1297,8 @@ public class ProcessEngine {
         ));
         log.info("business_rule_task '{}' decision '{}' → rule priority={} outputs={}",
             brt.code(), decisionRef, result.matchedRule().priority(), result.outputs());
+        meterRegistry.counter("bpm.decision.evaluated",
+            Tags.of("decision", decisionRef)).increment();
 
         consumeAndMoveToNext(instance, token, brt, def, userId);
     }
@@ -1441,6 +1555,7 @@ public class ProcessEngine {
             "elementCode", current.code(),
             "jobId", job.getId().toString()
         ));
+        metricInc("bpm.timer.fired");
         consumeAndMoveToNext(instance, token, current, def, null);
     }
 
@@ -1515,6 +1630,7 @@ public class ProcessEngine {
             "cancelledSiblingBoundaries", cancelledSiblings,
             "cancelledTaskInstanceId", attachedTaskId != null ? attachedTaskId.toString() : "(none)"
         ));
+        metricInc("bpm.boundary.fired");
 
         // 4. Crear nuevo token en outgoing del boundary
         ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
