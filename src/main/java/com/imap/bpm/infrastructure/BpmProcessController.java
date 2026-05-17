@@ -12,9 +12,11 @@ import com.imap.bpm.infrastructure.repository.TaskInstanceRepository;
 import com.imap.bpm.infrastructure.security.UserContext;
 import com.imap.bpm.infrastructure.security.UserContextHolder;
 import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
+import com.imap.eav.engine.context.EavTenantSession;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseEntity;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
@@ -48,17 +50,20 @@ public class BpmProcessController {
     private final ProcessInstanceRepository instanceRepo;
     private final AuditLogRepository auditRepo;
     private final ProcessDefinitionLoader loader;
+    private final EavTenantSession tenantSession;
 
     public BpmProcessController(ProcessEngine engine,
                                 TaskInstanceRepository taskRepo,
                                 ProcessInstanceRepository instanceRepo,
                                 AuditLogRepository auditRepo,
-                                ProcessDefinitionLoader loader) {
+                                ProcessDefinitionLoader loader,
+                                EavTenantSession tenantSession) {
         this.engine = engine;
         this.taskRepo = taskRepo;
         this.instanceRepo = instanceRepo;
         this.auditRepo = auditRepo;
         this.loader = loader;
+        this.tenantSession = tenantSession;
     }
 
     @PostMapping("/process/{versionId}/start")
@@ -105,7 +110,9 @@ public class BpmProcessController {
      * otros — comportamiento intencional pre-A3 que ahora se cierra).
      */
     @GetMapping("/me/tasks")
+    @Transactional(readOnly = true)
     public List<Map<String, Object>> listMyTasks(HttpServletRequest req) {
+        tenantSession.applyToCurrentTransaction();
         UUID tenantId = TenantContextHolder.get();
         UserContext user = UserContextHolder.get();
         UUID userId = user != null ? user.userId() : null;
@@ -154,8 +161,10 @@ public class BpmProcessController {
      * la entity structure que renderiza el form generator.
      */
     @GetMapping("/task/{taskInstanceId}")
+    @Transactional(readOnly = true)
     public ResponseEntity<Map<String, Object>> getTask(@PathVariable("taskInstanceId") String taskInstanceId,
                                                        HttpServletRequest req) {
+        tenantSession.applyToCurrentTransaction();
         UUID taskId = UUID.fromString(taskInstanceId);
         UUID tenantId = TenantContextHolder.get();
         String bearerToken = extractBearer(req);
@@ -205,8 +214,10 @@ public class BpmProcessController {
      * está parado el motor.
      */
     @GetMapping("/instance/{instanceId}")
+    @Transactional(readOnly = true)
     public ResponseEntity<Map<String, Object>> getInstance(@PathVariable("instanceId") String instanceId,
                                                            HttpServletRequest req) {
+        tenantSession.applyToCurrentTransaction();
         UUID id = UUID.fromString(instanceId);
         UUID tenantId = TenantContextHolder.get();
         String bearerToken = extractBearer(req);
