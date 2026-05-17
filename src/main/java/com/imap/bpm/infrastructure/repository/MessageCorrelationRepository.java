@@ -25,4 +25,7 @@ public interface MessageCorrelationRepository extends JpaRepository<MessageCorre
         UUID messagedefId, String lifecycle);
 
     List<MessageCorrelation> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
+
+    /** Para cascade DELETE de instance (admin cleanup). */
+    long deleteByProcessinstanceId(UUID processinstanceId);
 }

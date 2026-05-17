@@ -16,4 +16,7 @@ public interface TokenRepository extends JpaRepository<Token, UUID> {
      */
     List<Token> findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
         UUID processinstanceId, UUID currentElementId, String lifecycle);
+
+    /** Para cascade DELETE de instance (admin cleanup). */
+    long deleteByProcessinstanceId(UUID processinstanceId);
 }

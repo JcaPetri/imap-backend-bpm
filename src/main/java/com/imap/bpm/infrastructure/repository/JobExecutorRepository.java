@@ -29,4 +29,7 @@ public interface JobExecutorRepository extends JpaRepository<JobExecutor, UUID> 
 
     List<JobExecutor> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
     List<JobExecutor> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
+
+    /** Para cascade DELETE de instance (admin cleanup). */
+    long deleteByProcessinstanceId(UUID processinstanceId);
 }

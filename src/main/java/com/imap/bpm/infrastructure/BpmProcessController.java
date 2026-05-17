@@ -9,6 +9,10 @@ import com.imap.bpm.infrastructure.entity.TaskInstance;
 import com.imap.bpm.infrastructure.repository.AuditLogRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.TaskInstanceRepository;
+import com.imap.bpm.infrastructure.repository.JobExecutorRepository;
+import com.imap.bpm.infrastructure.repository.MessageCorrelationRepository;
+import com.imap.bpm.infrastructure.repository.TokenRepository;
+import com.imap.bpm.infrastructure.repository.VariableRepository;
 import com.imap.bpm.infrastructure.security.UserContext;
 import com.imap.bpm.infrastructure.security.UserContextHolder;
 import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
@@ -31,6 +35,8 @@ import java.util.*;
  *   GET  /v1/bpm/instance/{instanceId}              → estado + audit log de instance
  *   POST /v1/bpm/messages/correlate                 → A2 — correlate message
  *   POST /v1/bpm/signals/broadcast                  → A2 — broadcast signal
+ *   GET    /v1/bpm/processdef/{id}/instances        → admin: lista instances
+ *   DELETE /v1/bpm/instance/{id}                    → admin: cascade delete
  *
  * Por simplicidad MVP, el endpoint /start recibe el processVersionId directo
  * (no el processdef code). Esto evita una llamada extra a system para resolver
@@ -51,19 +57,31 @@ public class BpmProcessController {
     private final AuditLogRepository auditRepo;
     private final ProcessDefinitionLoader loader;
     private final EavTenantSession tenantSession;
+    private final TokenRepository tokenRepo;
+    private final VariableRepository varRepo;
+    private final JobExecutorRepository jobRepo;
+    private final MessageCorrelationRepository msgCorrRepo;
 
     public BpmProcessController(ProcessEngine engine,
                                 TaskInstanceRepository taskRepo,
                                 ProcessInstanceRepository instanceRepo,
                                 AuditLogRepository auditRepo,
                                 ProcessDefinitionLoader loader,
-                                EavTenantSession tenantSession) {
+                                EavTenantSession tenantSession,
+                                TokenRepository tokenRepo,
+                                VariableRepository varRepo,
+                                JobExecutorRepository jobRepo,
+                                MessageCorrelationRepository msgCorrRepo) {
         this.engine = engine;
         this.taskRepo = taskRepo;
         this.instanceRepo = instanceRepo;
         this.auditRepo = auditRepo;
         this.loader = loader;
         this.tenantSession = tenantSession;
+        this.tokenRepo = tokenRepo;
+        this.varRepo = varRepo;
+        this.jobRepo = jobRepo;
+        this.msgCorrRepo = msgCorrRepo;
     }
 
     @PostMapping("/process/{versionId}/start")
@@ -326,6 +344,99 @@ public class BpmProcessController {
         out.put("signalCode", signalCode);
         out.put("reactivatedTokens", reactivated);
         return out;
+    }
+
+    // ─── Admin: list + delete instance (cascade) ─────────────────────────────
+
+    /**
+     * Lista instances de un processdef (uso admin / cleanup script).
+     * Filtra por lifecycle opcional. Sin filtro devuelve todas.
+     *
+     * Devuelve solo metadata mínima (id, lifecycle, startedAt, endedAt) —
+     * para detalle usar GET /instance/{id}.
+     */
+    @GetMapping("/processdef/{processdefId}/instances")
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> listInstancesByProcessdef(
+            @PathVariable("processdefId") String processdefIdStr,
+            @RequestParam(value = "lifecycle", required = false) String lifecycleFilter) {
+        tenantSession.applyToCurrentTransaction();
+        UUID processdefId = UUID.fromString(processdefIdStr);
+        List<ProcessInstance> rows;
+        if (lifecycleFilter == null || lifecycleFilter.isBlank()) {
+            rows = instanceRepo.findByProcessdefIdOrderByStartedAtDesc(processdefId);
+        } else {
+            rows = instanceRepo.findByProcessdefIdAndLifecycle(processdefId, lifecycleFilter);
+        }
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (ProcessInstance i : rows) {
+            Map<String, Object> r = new LinkedHashMap<>();
+            r.put("id", i.getId().toString());
+            r.put("lifecycle", i.getLifecycle());
+            r.put("startedAt", i.getStartedAt());
+            r.put("endedAt", i.getEndedAt());
+            r.put("parentInstanceId", i.getParentInstanceId() != null
+                ? i.getParentInstanceId().toString() : null);
+            out.add(r);
+        }
+        return out;
+    }
+
+    /**
+     * Cascade DELETE de una processinstance + todas sus dependencias:
+     *   variables + tasks + tokens + audit + correlations + jobs + instance.
+     *
+     * Safety guard: por default solo permite borrar instances en lifecycle
+     * terminal (completed/cancelled/failed). Para borrar instances activas
+     * usar ?force=true (responsabilidad del caller — usa solo si la instance
+     * está atascada huérfana).
+     *
+     * Devuelve counters de qué borró.
+     */
+    @DeleteMapping("/instance/{instanceId}")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> deleteInstance(
+            @PathVariable("instanceId") String instanceIdStr,
+            @RequestParam(value = "force", defaultValue = "false") boolean force) {
+        tenantSession.applyToCurrentTransaction();
+        UUID instanceId = UUID.fromString(instanceIdStr);
+        ProcessInstance instance = instanceRepo.findById(instanceId).orElse(null);
+        if (instance == null) return ResponseEntity.notFound().build();
+
+        // Safety: rechazar si activa salvo ?force=true
+        boolean terminal = List.of("completed", "cancelled", "failed")
+            .contains(instance.getLifecycle());
+        if (!terminal && !force) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", "instance_active");
+            err.put("message", "Instance lifecycle is '" + instance.getLifecycle()
+                + "'. Use ?force=true to delete active instances.");
+            err.put("lifecycle", instance.getLifecycle());
+            return ResponseEntity.status(409).body(err);
+        }
+
+        // Cascade delete (orden FK: variables/tasks/tokens/audit/jobs/correlations primero, instance al final)
+        long vars  = varRepo.deleteByProcessinstanceId(instanceId);
+        long tasks = taskRepo.deleteByProcessinstanceId(instanceId);
+        long tokens = tokenRepo.deleteByProcessinstanceId(instanceId);
+        long audits = auditRepo.deleteByProcessinstanceId(instanceId);
+        long jobs   = jobRepo.deleteByProcessinstanceId(instanceId);
+        long corrs  = msgCorrRepo.deleteByProcessinstanceId(instanceId);
+        instanceRepo.delete(instance);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", instanceId.toString());
+        out.put("deleted", true);
+        out.put("forcedActive", !terminal && force);
+        out.put("counts", Map.of(
+            "variables", vars,
+            "tasks", tasks,
+            "tokens", tokens,
+            "auditLogs", audits,
+            "jobs", jobs,
+            "messageCorrelations", corrs
+        ));
+        return ResponseEntity.ok(out);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

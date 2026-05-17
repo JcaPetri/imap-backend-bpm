@@ -25,4 +25,7 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, UUID
      */
     List<TaskInstance> findByTenantIdAndLifecycleInOrderByCreatedAtDesc(
         UUID tenantId, List<String> lifecycles);
+
+    /** Para cascade DELETE de instance (admin cleanup). */
+    long deleteByProcessinstanceId(UUID processinstanceId);
 }

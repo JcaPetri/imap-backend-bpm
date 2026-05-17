@@ -10,4 +10,7 @@ public interface ProcessInstanceRepository extends JpaRepository<ProcessInstance
     List<ProcessInstance> findByTenantIdAndLifecycle(UUID tenantId, String lifecycle);
     List<ProcessInstance> findByProcessdefIdAndLifecycle(UUID processdefId, String lifecycle);
     List<ProcessInstance> findByParentInstanceId(UUID parentInstanceId);
+
+    /** Para listado admin (cleanup script). */
+    List<ProcessInstance> findByProcessdefIdOrderByStartedAtDesc(UUID processdefId);
 }

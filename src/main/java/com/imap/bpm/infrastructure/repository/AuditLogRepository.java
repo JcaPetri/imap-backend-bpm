@@ -8,4 +8,7 @@ import java.util.UUID;
 
 public interface AuditLogRepository extends JpaRepository<AuditLog, UUID> {
     List<AuditLog> findByProcessinstanceIdOrderByOccurredAtDesc(UUID processinstanceId);
+
+    /** Para cascade DELETE de instance (admin cleanup). */
+    long deleteByProcessinstanceId(UUID processinstanceId);
 }

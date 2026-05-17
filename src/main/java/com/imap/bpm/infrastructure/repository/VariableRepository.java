@@ -10,4 +10,7 @@ import java.util.UUID;
 public interface VariableRepository extends JpaRepository<Variable, UUID> {
     Optional<Variable> findByProcessinstanceIdAndVarName(UUID processinstanceId, String varName);
     List<Variable> findByProcessinstanceId(UUID processinstanceId);
+
+    /** Para cascade DELETE de instance (admin cleanup). */
+    long deleteByProcessinstanceId(UUID processinstanceId);
 }
