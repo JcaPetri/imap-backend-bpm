@@ -39,6 +39,26 @@ public record ProcessDefinition(
             .findFirst().orElse(null);
     }
 
+    /**
+     * B2 — devuelve los boundary_event flow_elements adjuntos a una activity
+     * (por code). Convención: el boundary_event tiene
+     * config.boundary.attachedTo = elementCode del activity.
+     */
+    @SuppressWarnings("unchecked")
+    public List<FlowElement> findBoundariesFor(String elementCode) {
+        if (elementCode == null) return java.util.List.of();
+        return flowElements.stream()
+            .filter(fe -> "boundary_event".equals(fe.type()))
+            .filter(fe -> {
+                Map<String, Object> cfg = fe.config();
+                if (cfg == null) return false;
+                Map<String, Object> boundary = (Map<String, Object>) cfg.get("boundary");
+                if (boundary == null) return false;
+                return elementCode.equals(boundary.get("attachedTo"));
+            })
+            .toList();
+    }
+
     /** Sequence flows salientes de un flowelement, ordenados. */
     public List<SequenceFlow> outgoingFlows(UUID sourceId) {
         return sequenceFlows.stream()

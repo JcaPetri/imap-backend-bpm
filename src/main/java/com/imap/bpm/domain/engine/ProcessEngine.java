@@ -35,9 +35,16 @@ import java.util.*;
  *                         con parent_instance_id + parent_token_id; al
  *                         completar el child, copia returnVariables al parent
  *                         y reactiva el token waiting en el sub_process.
+ *   - boundary_event    (B2 — interrupting timer sobre user_task): adosado
+ *                         a una activity vía config.boundary.attachedTo;
+ *                         schedula JobExecutor al crear la activity; al
+ *                         disparar, cancela la task + consume token + crea
+ *                         nuevo token en outgoing del boundary.
  *
  * NO soportado todavía (backlog Paso 07+):
- *   - boundary_event    (timer/error/escalation)
+ *   - boundary_event sobre sub_process (requiere cancel-cascade child)
+ *   - boundary_event type=error/escalation (solo timer hoy)
+ *   - boundary_event no-interrupting (mantiene activity + token paralelo)
  *   - compensation
  *   - DMN engine (decision tables)
  *   - sub_process fire-and-forget (waitForCompletion=false)
@@ -203,6 +210,16 @@ public class ProcessEngine {
         audit(instance, "task.completed", task.getFlowelementId(), task.getTokenId(), userId,
             Map.of("taskInstanceId", task.getId().toString()));
 
+        // B2 — cancelar boundary timers del token antes de avanzar (sino
+        // disparan después de que la task ya está completa = bug).
+        if (task.getTokenId() != null) {
+            int cancelled = cancelBoundaryJobsForToken(task.getTokenId());
+            if (cancelled > 0) {
+                audit(instance, "boundary.cancelled", task.getFlowelementId(), task.getTokenId(), userId,
+                    Map.of("reason", "task.completed", "cancelledJobs", cancelled));
+            }
+        }
+
         // Avanza el token: el current element es el user_task que se acaba de
         // completar. Reactivamos el token (estaba 'waiting') y CONSUMIMOS el
         // current element pasando al siguiente — sino advanceToken vería el
@@ -270,6 +287,17 @@ public class ProcessEngine {
 
             case "sub_process":
                 handleSubProcess(instance, token, current, def, userId);
+                break;
+
+            case "boundary_event":
+                // B2 — un boundary_event NO recibe tokens entrantes normales
+                // (se dispara por interrupción de su activity adjunta). Si
+                // un token llega acá, lo tratamos como passthrough con warn.
+                log.warn("Token entered boundary_event '{}' directly — unusual, treating as passthrough",
+                    current.code());
+                audit(instance, "boundary_event.unexpected_entry", current.id(), token.getId(), userId,
+                    Map.of("elementCode", current.code()));
+                consumeAndMoveToNext(instance, token, current, def, userId);
                 break;
 
             default:
@@ -379,17 +407,131 @@ public class ProcessEngine {
         taskRepo.save(task);
 
         ProcessDefinition.TaskForm form = def.findTaskFormByFlowElement(userTask.id());
+
+        // B2 — programar boundary timers adjuntos (si hay)
+        int boundariesScheduled = scheduleBoundaryTimers(instance, token, userTask, task.getId(), def, userId);
+
         audit(instance, "task.created", userTask.id(), token.getId(), userId, Map.of(
             "taskInstanceId", task.getId().toString(),
             "elementCode", userTask.code(),
             "assignedUserId", task.getAssignedUserId() != null
                 ? task.getAssignedUserId().toString() : "(none)",
-            "formEntityDefCode", form != null ? form.entityDefCode() : "(none)"
+            "formEntityDefCode", form != null ? form.entityDefCode() : "(none)",
+            "boundariesScheduled", boundariesScheduled
         ));
-        log.info("UserTask '{}' created → task {} waiting (form={}, assignedTo={})",
+        log.info("UserTask '{}' created → task {} waiting (form={}, assignedTo={}, boundaries={})",
             userTask.code(), task.getId(),
             form != null ? form.entityDefCode() : "none",
-            task.getAssignedUserId());
+            task.getAssignedUserId(),
+            boundariesScheduled);
+    }
+
+    // ─── boundary_event (B2 — interrupting timer sobre user_task) ───────────
+
+    /**
+     * Para cada boundary_event con type=timer adjunto al activity, schedula
+     * un JobExecutor con fire_at = now + delaySeconds. El job lleva en su
+     * config_jsonb el marker `boundary: true` + `boundaryElementId` +
+     * `attachedTaskInstanceId` (si user_task) para que fireTimerJob pueda
+     * discriminar boundary vs intermediate timer.
+     *
+     * Si no hay boundaries para esta activity → devuelve 0 (no-op).
+     *
+     * NOTA: scope MVP B2 → solo timer; error/escalation pendiente.
+     */
+    @SuppressWarnings("unchecked")
+    private int scheduleBoundaryTimers(ProcessInstance instance, Token activityToken,
+                                        ProcessDefinition.FlowElement activity,
+                                        UUID attachedTaskInstanceId,
+                                        ProcessDefinition def, UUID userId) {
+        List<ProcessDefinition.FlowElement> boundaries = def.findBoundariesFor(activity.code());
+        if (boundaries.isEmpty()) return 0;
+
+        int scheduled = 0;
+        OffsetDateTime now = OffsetDateTime.now();
+        for (ProcessDefinition.FlowElement b : boundaries) {
+            Map<String, Object> cfg = b.config();
+            Map<String, Object> timerCfg = cfg == null ? null
+                : (Map<String, Object>) cfg.get("timer");
+            if (timerCfg == null) {
+                log.warn("boundary_event '{}' attached to '{}' has no timer config — skip (MVP only supports timer)",
+                    b.code(), activity.code());
+                continue;
+            }
+            long delaySeconds;
+            Object delayObj = timerCfg.get("delaySeconds");
+            try {
+                delaySeconds = delayObj instanceof Number n ? n.longValue()
+                    : Long.parseLong(String.valueOf(delayObj));
+            } catch (NumberFormatException e) {
+                log.error("boundary_event '{}' invalid delaySeconds: {}", b.code(), delayObj);
+                continue;
+            }
+
+            Map<String, Object> boundaryCfg = cfg == null ? Map.of()
+                : (Map<String, Object>) cfg.getOrDefault("boundary", Map.of());
+            boolean interrupting = !(Boolean.FALSE.equals(boundaryCfg.get("interrupting")));
+
+            JobExecutor job = new JobExecutor();
+            job.setId(UUID.randomUUID());
+            job.setTenantId(instance.getTenantId());
+            job.setProcessinstanceId(instance.getId());
+            job.setTokenId(activityToken.getId());
+            job.setJobType("timer");
+            job.setFireAt(now.plusSeconds(delaySeconds));
+            Map<String, Object> jobCfg = new LinkedHashMap<>();
+            jobCfg.put("boundary", true);
+            jobCfg.put("boundaryElementId", b.id().toString());
+            jobCfg.put("boundaryElementCode", b.code());
+            jobCfg.put("attachedToElementId", activity.id().toString());
+            jobCfg.put("attachedToElementCode", activity.code());
+            if (attachedTaskInstanceId != null)
+                jobCfg.put("attachedTaskInstanceId", attachedTaskInstanceId.toString());
+            jobCfg.put("interrupting", interrupting);
+            jobCfg.put("delaySeconds", delaySeconds);
+            job.setConfig(jobCfg);
+            job.setLifecycle("scheduled");
+            job.setRetries(0);
+            job.setMaxRetries(3);
+            job.setStateId(DEFAULT_STATE_ACTIVE);
+            job.setCreatedAt(now);
+            job.setUpdatedAt(now);
+            jobRepo.save(job);
+
+            audit(instance, "boundary.scheduled", b.id(), activityToken.getId(), userId, Map.of(
+                "boundaryCode", b.code(),
+                "attachedToCode", activity.code(),
+                "jobId", job.getId().toString(),
+                "fireAt", job.getFireAt().toString(),
+                "interrupting", interrupting
+            ));
+            scheduled++;
+        }
+        return scheduled;
+    }
+
+    /**
+     * Cancela todos los boundary jobs `scheduled` del token de la activity.
+     * Llamado cuando la activity completa normalmente (completeTask, etc).
+     * Idempotente: si no hay jobs o ya están cancelled/fired, no hace nada.
+     */
+    private int cancelBoundaryJobsForToken(UUID tokenId) {
+        if (tokenId == null) return 0;
+        List<JobExecutor> jobs = jobRepo.findByTokenIdAndLifecycle(tokenId, "scheduled");
+        if (jobs.isEmpty()) return 0;
+        OffsetDateTime now = OffsetDateTime.now();
+        int cancelled = 0;
+        for (JobExecutor j : jobs) {
+            // Solo cancelar boundary jobs — no afectar timer events normales
+            // (que también usan tokenId pero con boundary=false en config).
+            Object boundaryFlag = j.getConfig() == null ? null : j.getConfig().get("boundary");
+            if (!Boolean.TRUE.equals(boundaryFlag)) continue;
+            j.setLifecycle("cancelled");
+            j.setUpdatedAt(now);
+            jobRepo.save(j);
+            cancelled++;
+        }
+        return cancelled;
     }
 
     // ─── exclusive_gateway ──────────────────────────────────────────────────
@@ -1069,8 +1211,14 @@ public class ProcessEngine {
 
     /**
      * Dispara un job timer vencido. Llamado por JobExecutorWorker.
-     * Reactiva el token (waiting → active) y lo avanza al siguiente flow
-     * element. Idempotente vía el chequeo de lifecycle del job.
+     *
+     * Dispatch por el flag `boundary` en config_jsonb:
+     *   - boundary=true → fireBoundaryTimer (B2 — interrumpe activity y
+     *                     avanza por rama escapada)
+     *   - boundary=false/null → flow normal: reactiva token + advance
+     *                            (intermediate_event timer del A2)
+     *
+     * Idempotente vía el chequeo de lifecycle del job.
      */
     @Transactional
     public void fireTimerJob(UUID jobId) {
@@ -1115,19 +1263,14 @@ public class ProcessEngine {
                 return;
             }
 
-            // Reactivar token y avanzar al siguiente
-            token.setLifecycle("active");
-            token.setUpdatedAt(now);
-            tokenRepo.save(token);
+            // B2 — dispatch: boundary vs intermediate_event timer
+            boolean isBoundary = job.getConfig() != null
+                && Boolean.TRUE.equals(job.getConfig().get("boundary"));
 
-            ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
-            ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
-            if (current != null) {
-                audit(instance, "timer.fired", current.id(), token.getId(), null, Map.of(
-                    "elementCode", current.code(),
-                    "jobId", job.getId().toString()
-                ));
-                consumeAndMoveToNext(instance, token, current, def, null);
+            if (isBoundary) {
+                fireBoundaryTimer(instance, token, job);
+            } else {
+                fireIntermediateTimer(instance, token, job);
             }
 
             job.setLifecycle("fired");
@@ -1150,6 +1293,118 @@ public class ProcessEngine {
             job.setUpdatedAt(OffsetDateTime.now());
             jobRepo.save(job);
         }
+    }
+
+    /** Flow normal del timer event (A2 intermediate_event). */
+    private void fireIntermediateTimer(ProcessInstance instance, Token token, JobExecutor job) {
+        OffsetDateTime now = OffsetDateTime.now();
+        token.setLifecycle("active");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
+        if (current == null) return;
+        audit(instance, "timer.fired", current.id(), token.getId(), null, Map.of(
+            "elementCode", current.code(),
+            "jobId", job.getId().toString()
+        ));
+        consumeAndMoveToNext(instance, token, current, def, null);
+    }
+
+    /**
+     * B2 — dispara un boundary timer: interrumpe la activity y avanza un
+     * nuevo token por el outgoing del boundary_event.
+     *
+     * Pasos (modo interrupting=true MVP):
+     *   1. Cancelar OTRAS boundary jobs del mismo token (si había varias)
+     *   2. Cancelar la TaskInstance asociada (si hay) → lifecycle=cancelled
+     *   3. Consumir el token de la activity (sigue waiting → consumed)
+     *   4. Crear NUEVO token activo en el outgoing del boundary_event
+     *   5. Avanzar el nuevo token
+     *
+     * Si interrupting=false (no-interrupt) → no-op por ahora (queda para futuro).
+     */
+    @SuppressWarnings("unchecked")
+    private void fireBoundaryTimer(ProcessInstance instance, Token activityToken, JobExecutor job) {
+        Map<String, Object> cfg = job.getConfig();
+        boolean interrupting = !(Boolean.FALSE.equals(cfg.get("interrupting")));
+        UUID boundaryElementId = UUID.fromString((String) cfg.get("boundaryElementId"));
+        String boundaryCode = (String) cfg.getOrDefault("boundaryElementCode", "?");
+        String attachedToCode = (String) cfg.getOrDefault("attachedToElementCode", "?");
+        UUID attachedTaskId = cfg.get("attachedTaskInstanceId") == null ? null
+            : UUID.fromString((String) cfg.get("attachedTaskInstanceId"));
+
+        if (!interrupting) {
+            // Non-interrupting MVP: solo creamos token paralelo y NO consumimos el activity token
+            log.warn("Non-interrupting boundary {} fired — not implemented in MVP, skipping", boundaryCode);
+            audit(instance, "boundary.skipped_noninterrupt", boundaryElementId,
+                activityToken.getId(), null, Map.of("boundaryCode", boundaryCode));
+            return;
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // 1. Cancelar OTRAS boundary jobs del mismo token (mismo activity)
+        List<JobExecutor> siblings = jobRepo.findByTokenIdAndLifecycle(activityToken.getId(), "scheduled");
+        int cancelledSiblings = 0;
+        for (JobExecutor sib : siblings) {
+            if (Objects.equals(sib.getId(), job.getId())) continue;  // skip self (firing)
+            Object boundaryFlag = sib.getConfig() == null ? null : sib.getConfig().get("boundary");
+            if (!Boolean.TRUE.equals(boundaryFlag)) continue;
+            sib.setLifecycle("cancelled");
+            sib.setUpdatedAt(now);
+            jobRepo.save(sib);
+            cancelledSiblings++;
+        }
+
+        // 2. Cancelar TaskInstance asociada (si hay)
+        if (attachedTaskId != null) {
+            taskRepo.findById(attachedTaskId).ifPresent(t -> {
+                if (List.of("created", "assigned", "in_progress").contains(t.getLifecycle())) {
+                    t.setLifecycle("cancelled");
+                    t.setUpdatedAt(now);
+                    taskRepo.save(t);
+                    audit(instance, "task.cancelled", t.getFlowelementId(), activityToken.getId(), null,
+                        Map.of("taskInstanceId", t.getId().toString(), "reason", "boundary_timer_fired"));
+                }
+            });
+        }
+
+        // 3. Consumir activity token
+        activityToken.setLifecycle("consumed");
+        activityToken.setUpdatedAt(now);
+        tokenRepo.save(activityToken);
+
+        audit(instance, "boundary.fired", boundaryElementId, activityToken.getId(), null, Map.of(
+            "boundaryCode", boundaryCode,
+            "attachedToCode", attachedToCode,
+            "interrupted", true,
+            "cancelledSiblingBoundaries", cancelledSiblings,
+            "cancelledTaskInstanceId", attachedTaskId != null ? attachedTaskId.toString() : "(none)"
+        ));
+
+        // 4. Crear nuevo token en outgoing del boundary
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(boundaryElementId);
+        if (outgoing.isEmpty()) {
+            log.warn("boundary_event '{}' has no outgoing flow — instance may stall", boundaryCode);
+            return;
+        }
+
+        // El boundary token hereda el parent_token_id del activity token (mantiene
+        // el scope de paralelismo si el activity estaba dentro de un SPLIT).
+        Token boundaryToken = newToken(instance, outgoing.get(0).targetId(), activityToken.getParentTokenId());
+        tokenRepo.save(boundaryToken);
+        ProcessDefinition.FlowElement target = def.findElementById(outgoing.get(0).targetId());
+        audit(instance, "token.entered", outgoing.get(0).targetId(), boundaryToken.getId(), null, Map.of(
+            "elementCode", target != null ? target.code() : "?",
+            "elementType", target != null ? target.type() : "?",
+            "fromBoundary", boundaryCode
+        ));
+
+        // 5. Avanzar
+        advanceToken(instance, boundaryToken, def, null);
     }
 
     /** JEXL eval. Soporta `${motivo == 'UsuPte'}` o `motivo == 'UsuPte'` (sin wrap). */
