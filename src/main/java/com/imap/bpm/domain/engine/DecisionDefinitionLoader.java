@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.imap.bpm.infrastructure.security.BearerTokenHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -55,10 +56,14 @@ public class DecisionDefinitionLoader {
         }
         log.info("DecisionDefinitionLoader cache MISS — fetching '{}' from system", decisionCode);
 
+        // Fallback: si no nos pasaron bearer, leerlo del request actual (B3 — la
+        // mayoría de cache misses ocurren durante advanceToken donde el bearer
+        // no llega por la signature). Ver BearerTokenHolder doc.
+        final String effectiveBearer = bearerToken != null ? bearerToken : BearerTokenHolder.get();
         Map<String, Object> resp = http.get()
             .uri("/v1/admin/bpm/decisiondef/by-code/{code}/full", decisionCode)
             .headers(h -> {
-                if (bearerToken != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + bearerToken);
+                if (effectiveBearer != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + effectiveBearer);
                 if (tenantId != null) h.set("X-Tenant-Id", tenantId.toString());
             })
             .retrieve()

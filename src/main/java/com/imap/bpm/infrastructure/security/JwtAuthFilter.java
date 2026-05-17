@@ -116,6 +116,10 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         }
 
         UserContextHolder.set(ctx);
+        // B3 — guardar el bearer original para propagar a llamadas s2s al system
+        // (ProcessDefinitionLoader / DecisionDefinitionLoader leen del holder
+        // cuando hacen cache MISS sin tener el token explícito en la cadena).
+        BearerTokenHolder.set(token);
         if (log.isDebugEnabled()) {
             log.debug("Authenticated user={} ({}), tenants={}, impersonation={}",
                       ctx.userId(), ctx.email(),
@@ -126,6 +130,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             chain.doFilter(req, res);
         } finally {
             UserContextHolder.clear();
+            BearerTokenHolder.clear();
         }
     }
 

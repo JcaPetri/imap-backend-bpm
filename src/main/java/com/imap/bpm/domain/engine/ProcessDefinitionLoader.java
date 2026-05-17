@@ -3,6 +3,7 @@ package com.imap.bpm.domain.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.imap.bpm.infrastructure.security.BearerTokenHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,10 +58,13 @@ public class ProcessDefinitionLoader {
         }
         log.info("ProcessDefinitionLoader cache MISS — fetching {} from system", processVersionId);
 
+        // Fallback al BearerTokenHolder cuando no nos pasaron bearer en la
+        // signature (común durante advanceToken recursivo, fireTimerJob, etc).
+        final String effectiveBearer = bearerToken != null ? bearerToken : BearerTokenHolder.get();
         Map<String, Object> resp = http.get()
             .uri("/v1/admin/bpm/processversion/{id}/full", processVersionId.toString())
             .headers(h -> {
-                if (bearerToken != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + bearerToken);
+                if (effectiveBearer != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + effectiveBearer);
                 if (tenantId != null)    h.set("X-Tenant-Id", tenantId.toString());
             })
             .retrieve()
