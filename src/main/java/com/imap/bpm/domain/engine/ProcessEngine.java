@@ -168,12 +168,21 @@ public class ProcessEngine {
         audit(instance, "task.completed", task.getFlowelementId(), task.getTokenId(), userId,
             Map.of("taskInstanceId", task.getId().toString()));
 
-        // Avanza el token asociado
+        // Avanza el token: el current element es el user_task que se acaba de
+        // completar. Reactivamos el token (estaba 'waiting') y CONSUMIMOS el
+        // current element pasando al siguiente — sino advanceToken vería el
+        // user_task otra vez y crearía OTRA TaskInstance (bug catched 2026-05-17).
         if (task.getTokenId() != null) {
             Token token = tokenRepo.findById(task.getTokenId()).orElse(null);
-            if (token != null) {
+            if (token != null && "waiting".equals(token.getLifecycle())) {
+                token.setLifecycle("active");
+                token.setUpdatedAt(now);
+                tokenRepo.save(token);
                 ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
-                advanceToken(instance, token, def, userId);
+                ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
+                if (current != null) {
+                    consumeAndMoveToNext(instance, token, current, def, userId);
+                }
             }
         }
         return task;
