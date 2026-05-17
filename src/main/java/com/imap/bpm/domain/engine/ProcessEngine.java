@@ -1595,8 +1595,26 @@ public class ProcessEngine {
      *
      * Idempotente vía el chequeo de lifecycle del job.
      */
+    /**
+     * Overload usado por JobExecutorWorker: setea el tenant ANTES del
+     * @Transactional para que el applyToCurrentTransaction interno
+     * encuentre el holder ya con el tenant del job.
+     */
+    public void fireTimerJob(UUID jobId, UUID tenantId) {
+        TenantContextHolder.set(tenantId);
+        try {
+            fireTimerJob(jobId);
+        } finally {
+            TenantContextHolder.clear();
+        }
+    }
+
     @Transactional
     public void fireTimerJob(UUID jobId) {
+        // Aplicar tenant (si el caller lo preseteó) ANTES de findById, sino
+        // RLS filtra el job y devuelve null pese a que existe.
+        tenantSession.applyToCurrentTransaction();
+
         JobExecutor job = jobRepo.findById(jobId).orElse(null);
         if (job == null) {
             log.warn("fireTimerJob: job {} not found", jobId);
@@ -1608,10 +1626,8 @@ public class ProcessEngine {
             return;
         }
 
-        // El worker scheduled corre sin TenantContextHolder seteado. Cargamos
-        // el tenant del job antes de SET LOCAL para que RLS funcione.
-        TenantContextHolder.set(job.getTenantId());
-        tenantSession.applyToCurrentTransaction();
+        // (tenant ya aplicado al inicio del método — el caller pre-setea
+        // el TenantContextHolder con el tenant del job antes de invocar.)
 
         OffsetDateTime now = OffsetDateTime.now();
         job.setLifecycle("firing");

@@ -37,11 +37,17 @@ public class JobScanService {
         this.jobRepo = jobRepo;
     }
 
+    /** Par (jobId, tenantId) — necesario para que fireTimerJob setee el
+     * tenant antes del findById (sino RLS bloquea). */
+    public record DueJob(UUID jobId, UUID tenantId) {}
+
     @Transactional(readOnly = true)
-    public List<UUID> findDueJobIds(int batchSize) {
+    public List<DueJob> findDueJobIds(int batchSize) {
         em.createNativeQuery("SET LOCAL app.bypass_rls = 'true'").executeUpdate();
         List<JobExecutor> rows = jobRepo.findDueJobs(OffsetDateTime.now(),
             PageRequest.of(0, batchSize));
-        return rows.stream().map(JobExecutor::getId).toList();
+        return rows.stream()
+            .map(j -> new DueJob(j.getId(), j.getTenantId()))
+            .toList();
     }
 }

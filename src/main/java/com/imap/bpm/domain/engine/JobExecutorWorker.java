@@ -43,24 +43,25 @@ public class JobExecutorWorker {
 
     @Scheduled(fixedDelay = 5000, initialDelay = 5000)
     public void tick() {
-        List<UUID> dueIds;
+        List<JobScanService.DueJob> dueJobs;
         try {
             // El scan corre en tx separada con bypass RLS (el worker no tiene
-            // tenant context). Por cada job ID, fireTimerJob abre su propia tx
-            // con el tenant del job seteado.
-            dueIds = scanService.findDueJobIds(BATCH_SIZE);
+            // tenant context). Devuelve pares (jobId, tenantId) para que
+            // fireTimerJob setee el tenant ANTES del findById (sino RLS
+            // filtraría y devolvería null).
+            dueJobs = scanService.findDueJobIds(BATCH_SIZE);
         } catch (Exception e) {
             log.error("JobExecutorWorker tick: findDueJobIds failed", e);
             return;
         }
-        if (dueIds.isEmpty()) return;
+        if (dueJobs.isEmpty()) return;
 
-        log.debug("JobExecutorWorker tick: {} due jobs to process", dueIds.size());
-        for (UUID jobId : dueIds) {
+        log.debug("JobExecutorWorker tick: {} due jobs to process", dueJobs.size());
+        for (JobScanService.DueJob d : dueJobs) {
             try {
-                engine.fireTimerJob(jobId);
+                engine.fireTimerJob(d.jobId(), d.tenantId());
             } catch (Exception e) {
-                log.error("JobExecutorWorker: uncaught error processing job {}", jobId, e);
+                log.error("JobExecutorWorker: uncaught error processing job {}", d.jobId(), e);
             }
         }
     }
