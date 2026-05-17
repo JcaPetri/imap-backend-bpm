@@ -42,13 +42,18 @@ import java.util.*;
  *                         schedula JobExecutor al crear la activity; al
  *                         disparar, cancela la task + consume token + crea
  *                         nuevo token en outgoing del boundary.
+ *   - business_rule_task (B3 — DMN): config.decisionRef apunta a un
+ *                         bpm_dmn_decisiondef por code. DmnEvaluator
+ *                         aplica operadores declarativos + hit policy,
+ *                         outputs van a variables del processinstance.
  *
  * NO soportado todavía (backlog Paso 07+):
  *   - boundary_event sobre sub_process (requiere cancel-cascade child)
  *   - boundary_event type=error/escalation (solo timer hoy)
  *   - boundary_event no-interrupting (mantiene activity + token paralelo)
  *   - compensation
- *   - DMN engine (decision tables)
+ *   - DMN hit policies priority/collect/any/output-order
+ *   - DMN FEEL expression language (MVP usa operadores declarativos)
  *   - sub_process fire-and-forget (waitForCompletion=false)
  */
 @Service
@@ -71,6 +76,8 @@ public class ProcessEngine {
     private final JobExecutorRepository jobRepo;
     private final MessageCorrelationRepository msgCorrRepo;
     private final EavTenantSession tenantSession;
+    private final DecisionDefinitionLoader decisionLoader;
+    private final DmnEvaluator dmnEvaluator;
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
 
@@ -83,6 +90,8 @@ public class ProcessEngine {
                          JobExecutorRepository jobRepo,
                          MessageCorrelationRepository msgCorrRepo,
                          EavTenantSession tenantSession,
+                         DecisionDefinitionLoader decisionLoader,
+                         DmnEvaluator dmnEvaluator,
                          ObjectMapper jackson) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
@@ -93,6 +102,8 @@ public class ProcessEngine {
         this.jobRepo = jobRepo;
         this.msgCorrRepo = msgCorrRepo;
         this.tenantSession = tenantSession;
+        this.decisionLoader = decisionLoader;
+        this.dmnEvaluator = dmnEvaluator;
         this.jackson = jackson;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
@@ -294,6 +305,10 @@ public class ProcessEngine {
 
             case "sub_process":
                 handleSubProcess(instance, token, current, def, userId);
+                break;
+
+            case "business_rule_task":
+                handleBusinessRuleTask(instance, token, current, def, userId);
                 break;
 
             case "boundary_event":
@@ -1073,6 +1088,105 @@ public class ProcessEngine {
             ));
 
         consumeAndMoveToNext(parent, parentToken, subProcessElement, parentDef, userId);
+    }
+
+    // ─── business_rule_task (B3 — DMN) ───────────────────────────────────────
+
+    /**
+     * Maneja un flow_element `business_rule_task` invocando el DmnEvaluator
+     * sobre la decisiondef referenciada por config.decisionRef.
+     *
+     * Convención de config (en bpm_pro_flowelement_config):
+     *   { "decisionRef": "credit_approval" }
+     *
+     * Las vars del processinstance se pasan directo como inputs (matcheo
+     * por var_name). Los outputs de la rule ganadora se setean directo
+     * como vars del processinstance (sobreescribiendo si ya existían).
+     *
+     * Si decisionRef falta → fallback passthrough (avanza sin evaluar)
+     * + audit `business_rule.passthrough`.
+     *
+     * Si la decisión no matchea ninguna rule → audit `decision.no_match`
+     * y avanza (no bloquea — el processdef puede tener un default).
+     */
+    @SuppressWarnings("unchecked")
+    private void handleBusinessRuleTask(ProcessInstance instance, Token token,
+                                         ProcessDefinition.FlowElement brt,
+                                         ProcessDefinition def, UUID userId) {
+        Map<String, Object> cfg = brt.config();
+        String decisionRef = cfg == null ? null : stringOr(cfg.get("decisionRef"), null);
+        if (decisionRef == null || decisionRef.isBlank()) {
+            log.warn("business_rule_task '{}' has no decisionRef — passthrough", brt.code());
+            audit(instance, "business_rule.passthrough", brt.id(), token.getId(), userId,
+                Map.of("elementCode", brt.code(), "reason", "missing decisionRef"));
+            consumeAndMoveToNext(instance, token, brt, def, userId);
+            return;
+        }
+
+        DecisionDefinition decision;
+        try {
+            decision = decisionLoader.load(decisionRef, null, instance.getTenantId());
+        } catch (Exception e) {
+            log.error("business_rule_task '{}': could not load decisionRef='{}'",
+                brt.code(), decisionRef, e);
+            audit(instance, "business_rule.load_error", brt.id(), token.getId(), userId,
+                Map.of("elementCode", brt.code(), "decisionRef", decisionRef, "error", e.getMessage()));
+            // Token waiting → admin debe intervenir
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            return;
+        }
+
+        Map<String, Object> inputs = currentVariablesAsMap(instance);
+        DmnEvaluator.EvaluationResult result;
+        try {
+            result = dmnEvaluator.evaluate(decision, inputs);
+        } catch (IllegalStateException e) {
+            // Hit policy violation (ej unique matcheó >1)
+            log.error("business_rule_task '{}': decision evaluation failed: {}",
+                brt.code(), e.getMessage());
+            audit(instance, "decision.error", brt.id(), token.getId(), userId, Map.of(
+                "elementCode", brt.code(),
+                "decisionRef", decisionRef,
+                "hitPolicy", decision.hitPolicy(),
+                "error", e.getMessage()
+            ));
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            return;
+        }
+
+        if (result.matchedRule() == null) {
+            audit(instance, "decision.no_match", brt.id(), token.getId(), userId, Map.of(
+                "elementCode", brt.code(),
+                "decisionRef", decisionRef,
+                "hitPolicy", decision.hitPolicy(),
+                "rulesEvaluated", decision.rules().size(),
+                "inputs", inputs
+            ));
+            log.info("business_rule_task '{}' decision '{}' had no match", brt.code(), decisionRef);
+            consumeAndMoveToNext(instance, token, brt, def, userId);
+            return;
+        }
+
+        // Mergear outputs como vars del processinstance
+        for (Map.Entry<String, Object> e : result.outputs().entrySet()) {
+            setVariable(instance, e.getKey(), e.getValue());
+        }
+
+        audit(instance, "decision.evaluated", brt.id(), token.getId(), userId, Map.of(
+            "elementCode", brt.code(),
+            "decisionRef", decisionRef,
+            "hitPolicy", decision.hitPolicy(),
+            "matchedRulePriority", result.matchedRule().priority(),
+            "totalMatched", result.totalMatched(),
+            "inputs", inputs,
+            "outputs", result.outputs()
+        ));
+        log.info("business_rule_task '{}' decision '{}' → rule priority={} outputs={}",
+            brt.code(), decisionRef, result.matchedRule().priority(), result.outputs());
+
+        consumeAndMoveToNext(instance, token, brt, def, userId);
     }
 
     /**
