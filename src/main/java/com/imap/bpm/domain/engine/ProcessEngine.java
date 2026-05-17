@@ -3,6 +3,8 @@ package com.imap.bpm.domain.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.infrastructure.entity.*;
 import com.imap.bpm.infrastructure.repository.*;
+import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
+import com.imap.eav.engine.context.EavTenantSession;
 import org.apache.commons.jexl3.JexlBuilder;
 import org.apache.commons.jexl3.JexlContext;
 import org.apache.commons.jexl3.JexlEngine;
@@ -68,6 +70,7 @@ public class ProcessEngine {
     private final AuditLogRepository auditRepo;
     private final JobExecutorRepository jobRepo;
     private final MessageCorrelationRepository msgCorrRepo;
+    private final EavTenantSession tenantSession;
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
 
@@ -79,6 +82,7 @@ public class ProcessEngine {
                          AuditLogRepository auditRepo,
                          JobExecutorRepository jobRepo,
                          MessageCorrelationRepository msgCorrRepo,
+                         EavTenantSession tenantSession,
                          ObjectMapper jackson) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
@@ -88,6 +92,7 @@ public class ProcessEngine {
         this.auditRepo = auditRepo;
         this.jobRepo = jobRepo;
         this.msgCorrRepo = msgCorrRepo;
+        this.tenantSession = tenantSession;
         this.jackson = jackson;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
@@ -112,6 +117,7 @@ public class ProcessEngine {
                                         String bearerToken,
                                         UUID tenantId,
                                         UUID userId) {
+        tenantSession.applyToCurrentTransaction();
         return startProcessInternal(processVersionId, payload, bearerToken, tenantId, userId,
             null, null);
     }
@@ -182,6 +188,7 @@ public class ProcessEngine {
                                      Map<String, Object> outputData,
                                      String bearerToken,
                                      UUID userId) {
+        tenantSession.applyToCurrentTransaction();
         TaskInstance task = taskRepo.findById(taskInstanceId)
             .orElseThrow(() -> new IllegalArgumentException("Task not found: " + taskInstanceId));
         if (!List.of("created", "assigned", "in_progress").contains(task.getLifecycle())) {
@@ -1081,6 +1088,7 @@ public class ProcessEngine {
     public int correlateMessage(String messageCode, String correlationKey,
                                  Map<String, Object> payload) {
         if (messageCode == null || messageCode.isBlank()) return 0;
+        tenantSession.applyToCurrentTransaction();
         UUID msgRefId = MessageCorrelation.messageRefId(messageCode);
 
         List<MessageCorrelation> matches = msgCorrRepo
@@ -1110,6 +1118,7 @@ public class ProcessEngine {
     @Transactional
     public int broadcastSignal(String signalCode, Map<String, Object> payload) {
         if (signalCode == null || signalCode.isBlank()) return 0;
+        tenantSession.applyToCurrentTransaction();
         UUID sigRefId = MessageCorrelation.signalRefId(signalCode);
         List<MessageCorrelation> matches = msgCorrRepo
             .findByMessagedefIdAndLifecycle(sigRefId, "waiting");
@@ -1233,6 +1242,11 @@ public class ProcessEngine {
             return;
         }
 
+        // El worker scheduled corre sin TenantContextHolder seteado. Cargamos
+        // el tenant del job antes de SET LOCAL para que RLS funcione.
+        TenantContextHolder.set(job.getTenantId());
+        tenantSession.applyToCurrentTransaction();
+
         OffsetDateTime now = OffsetDateTime.now();
         job.setLifecycle("firing");
         job.setUpdatedAt(now);
@@ -1292,6 +1306,10 @@ public class ProcessEngine {
             }
             job.setUpdatedAt(OffsetDateTime.now());
             jobRepo.save(job);
+        } finally {
+            // Limpiar el holder — el scheduler reusa threads, sino el próximo
+            // tick podría arrancar con el tenant del job anterior pegado.
+            TenantContextHolder.clear();
         }
     }
 
