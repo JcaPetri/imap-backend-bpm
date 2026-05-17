@@ -21,7 +21,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  *
  * Puerto: 8093 | Context path: /imap/bpm | Schema postgres: bpm
  */
-@SpringBootApplication
+@SpringBootApplication(scanBasePackages = {
+    "com.imap.bpm",
+    "com.imap.eav.engine"   // lib eav-engine: EavTenantSession (RLS bridge)
+})
 @EnableScheduling   // habilita JobExecutorWorker (A2 — timers via @Scheduled)
 public class BpmApplication {
 
