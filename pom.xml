@@ -101,6 +101,36 @@
             <artifactId>log4j-layout-template-json</artifactId>
         </dependency>
 
+        <!-- ===== IMAP EAV ENGINE (lib compartida) =====
+             Validators (41 atómicos) + ValidatorEngine + interfaces de
+             contexto/metadata. bpm implementa EntityMetadataProvider y
+             UniquenessChecker con sus propias queries (HTTP a system o local). -->
+        <dependency>
+            <groupId>com.imap</groupId>
+            <artifactId>eav-engine</artifactId>
+            <version>0.2.0-SNAPSHOT</version>
+        </dependency>
+
+        <!-- ===== JEXL3 — evaluador de condition_expr en exclusive_gateway ===== -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-jexl3</artifactId>
+            <version>3.3</version>
+        </dependency>
+
+        <!-- ===== Caffeine — cache local de processversion definitions ===== -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+            <version>3.1.8</version>
+        </dependency>
+
+        <!-- ===== WebClient — HTTP async a system (para fetchar definitions) ===== -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+
         <!-- ===== TEST ===== -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -108,15 +138,28 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- NO incluido todavía (planeado para iters siguientes):
-             - mapstruct                     (cuando empiece a haber DTOs vs entities)
-             - caffeine                      (cache de processversion definitions)
-             - json-schema-validator         (validación de DMN inputs)
-             - spring-kafka                  (eventos cross-microservicio)
-             - imap-eav-engine.jar           (motor V→R como librería compartida)
+        <!-- NO incluido todavía:
+             - mapstruct                  (cuando empiece a haber DTOs vs entities)
+             - json-schema-validator      (DMN inputs validation)
+             - spring-kafka               (eventos cross-microservicio)
         -->
 
     </dependencies>
+
+    <!-- ====================================================================
+         Repositorios — GitHub Packages para com.imap:eav-engine.
+         Auth: ~/.m2/settings.xml o env GITHUB_ACTOR + GITHUB_TOKEN en CI.
+         ==================================================================== -->
+    <repositories>
+        <repository>
+            <id>github</id>
+            <name>GitHub JcaPetri Apache Maven Packages</name>
+            <url>https://maven.pkg.github.com/JcaPetri/imap-eav-engine</url>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
 
     <build>
         <plugins>

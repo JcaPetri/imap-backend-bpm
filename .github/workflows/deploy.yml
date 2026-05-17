@@ -17,6 +17,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read     # para resolver com.imap:eav-engine de GitHub Packages
 
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +30,16 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
           cache: maven
+          # settings.xml automático con auth a GitHub Packages para resolver
+          # com.imap:eav-engine. Server id="github" en el repo del pom matchea.
+          server-id: github
+          server-username: GITHUB_ACTOR
+          server-password: GITHUB_TOKEN
 
       - name: Build jar (skip tests for now — UX gates en futuro Iter)
         run: mvn -B package -DskipTests
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify jar exists
         run: |
