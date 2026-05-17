@@ -26,6 +26,9 @@ public interface MessageCorrelationRepository extends JpaRepository<MessageCorre
 
     List<MessageCorrelation> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
 
+    /** Para C1 cancel: cancelar correlations waiting de la instance. */
+    List<MessageCorrelation> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
+
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);
 }
