@@ -41,6 +41,7 @@ import java.util.*;
  *   GET    /v1/bpm/processdefs/summary              → admin: resumen por processdef
  *   POST   /v1/bpm/instance/{id}/cancel             → admin: soft cancel (C1)
  *   DELETE /v1/bpm/instance/{id}                    → admin: cascade delete
+ *   POST   /v1/bpm/task/{id}/raise-error            → dispara boundary error/escalation
  *
  * Por simplicidad MVP, el endpoint /start recibe el processVersionId directo
  * (no el processdef code). Esto evita una llamada extra a system para resolver
@@ -351,6 +352,42 @@ public class BpmProcessController {
         out.put("signalCode", signalCode);
         out.put("reactivatedTokens", reactivated);
         return out;
+    }
+
+    // ─── Boundary error/escalation manual trigger (advanced) ─────────────────
+
+    /**
+     * Dispara un error sobre una task activa, buscando boundary_event de tipo
+     * error/escalation adjuntos que matcheen el errorCode. Si match → cancela
+     * la activity (si interrupting=true) + emite token en outgoing del boundary.
+     *
+     * Body: {"errorCode": "...", "payload": {...?}}.
+     *
+     * Devuelve {taskId, activityCode, errorCode, boundariesFired:N}.
+     * 404 si task no existe. 409 si task no está activa o no hay boundary matching.
+     */
+    @PostMapping("/task/{taskInstanceId}/raise-error")
+    public ResponseEntity<Map<String, Object>> raiseTaskError(
+            @PathVariable("taskInstanceId") String taskInstanceIdStr,
+            @RequestBody(required = false) Map<String, Object> body) {
+        UUID taskId = UUID.fromString(taskInstanceIdStr);
+        String errorCode = body == null ? null : (String) body.get("errorCode");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> payload = body == null ? null : (Map<String, Object>) body.get("payload");
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+
+        try {
+            Map<String, Object> result = engine.raiseTaskError(taskId, errorCode, payload, userId);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        } catch (IllegalStateException e) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", "raise_error_failed");
+            err.put("message", e.getMessage());
+            return ResponseEntity.status(409).body(err);
+        }
     }
 
     // ─── Admin: cancel instance (C1 — soft) ──────────────────────────────────

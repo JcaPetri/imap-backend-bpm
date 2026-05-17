@@ -409,10 +409,15 @@ public class ProcessEngine {
             log.info("ProcessInstance {} completed via {}", instance.getId(), endEvent.code());
             metricInc("bpm.instance.ended", instance.getProcessdefId().toString());
 
-            // B1 — si es child de un sub_process, notificar al parent para
-            // que avance el token waiting en el sub_process flow_element.
-            if (instance.getParentInstanceId() != null && instance.getParentTokenId() != null) {
-                notifyParentOfSubprocessCompletion(instance, userId);
+            // B1 — si es child de un sub_process, notificar al parent.
+            // Si fire-and-forget (parentTokenId=null) solo auditamos en el
+            // parent sin avanzar nada — el parent ya pasó al siguiente flow_element.
+            if (instance.getParentInstanceId() != null) {
+                if (instance.getParentTokenId() != null) {
+                    notifyParentOfSubprocessCompletion(instance, userId);
+                } else {
+                    auditFireAndForgetChildCompletion(instance, userId);
+                }
             }
         }
     }
@@ -687,18 +692,111 @@ public class ProcessEngine {
         instance.setUpdatedAt(now);
         instanceRepo.save(instance);
 
+        // Cancel-cascade: si la instance tiene children sub_process activos,
+        // cancelarlos recursivamente. La recursión es seguro porque
+        // findByParentInstanceId solo devuelve directos; los nietos se cancelan
+        // en la siguiente iteración recursiva al cancelar el child.
+        int childrenCascaded = 0;
+        for (ProcessInstance child : instanceRepo.findByParentInstanceId(instance.getId())) {
+            if ("active".equals(child.getLifecycle())) {
+                try {
+                    cancelInstance(child.getId(),
+                        "parent_cancelled:" + (reason == null ? "-" : reason),
+                        userId);
+                    childrenCascaded++;
+                } catch (Exception ex) {
+                    log.warn("cancel-cascade: child {} failed: {}", child.getId(), ex.getMessage());
+                }
+            }
+        }
+
         Map<String, Object> auditData = new LinkedHashMap<>();
         auditData.put("reason", reason == null ? "(no reason given)" : reason);
         auditData.put("tokensCancelled", tokensCancelled);
         auditData.put("tasksCancelled", tasksCancelled);
         auditData.put("jobsCancelled", jobsCancelled);
         auditData.put("correlationsCancelled", corrsCancelled);
+        auditData.put("childrenCascaded", childrenCascaded);
         audit(instance, "instance.cancelled", null, null, userId, auditData);
-        log.info("Instance {} cancelled (reason={}) — tokens={}, tasks={}, jobs={}, corrs={}",
-            instanceId, reason, tokensCancelled, tasksCancelled, jobsCancelled, corrsCancelled);
+        log.info("Instance {} cancelled (reason={}) — tokens={}, tasks={}, jobs={}, corrs={}, childrenCascaded={}",
+            instanceId, reason, tokensCancelled, tasksCancelled, jobsCancelled, corrsCancelled, childrenCascaded);
         metricInc("bpm.instance.cancelled", instance.getProcessdefId().toString());
 
         return auditData;
+    }
+
+    // ─── raise error sobre activity (boundary error/escalation, advanced) ───
+
+    /**
+     * Dispara un error sobre una TaskInstance activa, buscando boundary_events
+     * de tipo error/escalation adjuntos al activity que matcheen el errorCode.
+     *
+     * Si hay match → invoca el handler unificado de boundary (interrupting
+     * o non-interrupting según config). Si NO hay match → lanza
+     * IllegalStateException (el caller decide qué hacer: marcar task failed
+     * manualmente, retry, etc).
+     *
+     * Para MVP solo se llama externamente vía POST /v1/bpm/task/{id}/raise-error.
+     * Cuando service_task implemente invocación real, el motor también puede
+     * invocar este path al capturar excepción.
+     */
+    @Transactional
+    public Map<String, Object> raiseTaskError(UUID taskInstanceId, String errorCode,
+                                              Map<String, Object> payload, UUID userId) {
+        tenantSession.applyToCurrentTransaction();
+        TaskInstance task = taskRepo.findById(taskInstanceId)
+            .orElseThrow(() -> new IllegalArgumentException("Task not found: " + taskInstanceId));
+        if (!List.of("created", "assigned", "in_progress").contains(task.getLifecycle())) {
+            throw new IllegalStateException("Task " + taskInstanceId + " is not active (lifecycle="
+                + task.getLifecycle() + ")");
+        }
+        ProcessInstance instance = instanceRepo.findById(task.getProcessinstanceId())
+            .orElseThrow(() -> new IllegalStateException("Instance not found"));
+        Token activityToken = task.getTokenId() == null ? null
+            : tokenRepo.findById(task.getTokenId()).orElse(null);
+        if (activityToken == null) {
+            throw new IllegalStateException("Activity token not found for task " + taskInstanceId);
+        }
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition.FlowElement activity = def.findElementById(task.getFlowelementId());
+        if (activity == null) throw new IllegalStateException("Activity element not found");
+
+        List<ProcessDefinition.FlowElement> matches = def.findErrorBoundariesFor(activity.code(), errorCode);
+        if (matches.isEmpty()) {
+            throw new IllegalStateException("No error/escalation boundary on '" + activity.code()
+                + "' matches errorCode '" + errorCode + "'");
+        }
+
+        // Disparamos TODOS los boundaries que matchearon (regla BPMN: multiple
+        // catchers válido). Si alguno es interrupting, las siblings posteriores
+        // pueden tener activity ya consumed — el handler igual emite token
+        // en su outgoing (parallel branch).
+        int firedCount = 0;
+        for (ProcessDefinition.FlowElement boundary : matches) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> boundaryCfg = boundary.config() == null ? Map.of()
+                : (Map<String, Object>) boundary.config().getOrDefault("boundary", Map.of());
+            boolean interrupting = !(Boolean.FALSE.equals(boundaryCfg.get("interrupting")));
+
+            Map<String, Object> extra = new LinkedHashMap<>();
+            extra.put("trigger", "error");
+            extra.put("errorCode", errorCode);
+            if (payload != null && !payload.isEmpty()) extra.put("payload", payload);
+
+            fireBoundaryHandler(instance, activityToken,
+                boundary.id(), boundary.code(),
+                activity.code(), task.getId(),
+                interrupting, null,
+                "boundary.error.fired", "boundary_error_raised:" + errorCode,
+                extra);
+            firedCount++;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("taskId", taskInstanceId.toString());
+        out.put("activityCode", activity.code());
+        out.put("errorCode", errorCode);
+        out.put("boundariesFired", firedCount);
+        return out;
     }
 
     // ─── parallel_gateway (A1 — AND-split / AND-join) ────────────────────────
@@ -1023,21 +1121,27 @@ public class ProcessEngine {
      *     "callActivity": {
      *       "calledProcessversionId": "<uuid>",          // MVP: requerido
      *       "passVariables":   ["userId", "email"],       // opcional
-     *       "returnVariables": ["validationResult"]       // opcional
+     *       "returnVariables": ["validationResult"],      // opcional
+     *       "waitForCompletion": true                     // default true
      *     }
      *   }
      *
-     * Flujo:
-     *   1. Token del parent → waiting
-     *   2. Construir payload con las `passVariables` snapshotted del parent
-     *   3. Spawn child ProcessInstance via startProcessInternal con parent refs
-     *   4. Audit `subprocess.spawned`
+     * Flujos:
+     *   - waitForCompletion=true (default):
+     *       1. Token parent → waiting
+     *       2. Spawn child con parent_instance_id + parent_token_id
+     *       3. Cuando child completa, notifyParentOfSubprocessCompletion reactiva
+     *          el token waiting del parent y avanza al siguiente flow_element.
+     *   - waitForCompletion=false (fire-and-forget):
+     *       1. Spawn child con parent_instance_id pero parent_token_id=null
+     *          (no hay token waiting al cual volver)
+     *       2. Avanza el token parent INMEDIATAMENTE al siguiente flow_element.
+     *       3. Child sigue corriendo por su cuenta; al completar audita pero
+     *          no notifica al parent (notifyParent skip por parent_token_id=null).
      *
-     * El child puede completarse instantáneamente dentro de la misma transacción
-     * (procesos de solo service_tasks+gateways) o quedar en wait state. En
-     * ambos casos el comportamiento es correcto: si completa instantáneo,
-     * handleEndEvent del child llama notifyParentOfSubprocessCompletion que
-     * reactiva el token del parent ya marcado waiting (sin race condition).
+     * El child puede completarse instantáneamente (procesos de solo service_tasks
+     * + gateways) — no hay race condition porque el parent token ya está marcado
+     * waiting (caso wait) o ya pasó al siguiente (caso fire-and-forget).
      */
     @SuppressWarnings("unchecked")
     private void handleSubProcess(ProcessInstance instance, Token token,
@@ -1096,30 +1200,40 @@ public class ProcessEngine {
             }
         }
 
-        // Token del parent: waiting hasta que el child complete
+        // waitForCompletion: default true (parent espera). Si false, fire-and-forget.
+        boolean waitForCompletion = !(Boolean.FALSE.equals(callCfg.get("waitForCompletion")));
+
         OffsetDateTime now = OffsetDateTime.now();
-        token.setLifecycle("waiting");
-        token.setUpdatedAt(now);
-        tokenRepo.save(token);
+        if (waitForCompletion) {
+            token.setLifecycle("waiting");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+        }
+        // En fire-and-forget el token queda active y avanza al final del método.
 
         audit(instance, "subprocess.spawning", subProcess.id(), token.getId(), userId, Map.of(
             "elementCode", subProcess.code(),
             "calledProcessversionId", calledProcessVersionId.toString(),
-            "passVariables", childPayload.keySet()
+            "passVariables", childPayload.keySet(),
+            "waitForCompletion", waitForCompletion
         ));
 
-        // Spawn child (puede completarse instantáneo dentro de esta transaction)
+        // Spawn child. Si fire-and-forget, parent_token_id=null para que
+        // notifyParentOfSubprocessCompletion sepa que no hay token al cual volver.
         ProcessInstance child;
         try {
             child = startProcessInternal(calledProcessVersionId, childPayload,
                 null /*bearer*/, instance.getTenantId(), userId,
-                instance.getId(), token.getId());
+                instance.getId(),
+                waitForCompletion ? token.getId() : null);
         } catch (Exception ex) {
             log.error("sub_process '{}' spawn failed", subProcess.code(), ex);
-            // Reactivar token y pasar al siguiente igual (fallback graceful)
-            token.setLifecycle("active");
-            token.setUpdatedAt(OffsetDateTime.now());
-            tokenRepo.save(token);
+            // Reactivar token (si estaba waiting) y pasar al siguiente
+            if (waitForCompletion) {
+                token.setLifecycle("active");
+                token.setUpdatedAt(OffsetDateTime.now());
+                tokenRepo.save(token);
+            }
             audit(instance, "subprocess.spawn_failed", subProcess.id(), token.getId(), userId,
                 Map.of("elementCode", subProcess.code(), "error", ex.getMessage()));
             consumeAndMoveToNext(instance, token, subProcess, def, userId);
@@ -1129,11 +1243,18 @@ public class ProcessEngine {
         audit(instance, "subprocess.spawned", subProcess.id(), token.getId(), userId, Map.of(
             "elementCode", subProcess.code(),
             "childInstanceId", child.getId().toString(),
-            "childLifecycle", child.getLifecycle()
+            "childLifecycle", child.getLifecycle(),
+            "waitForCompletion", waitForCompletion
         ));
-        log.info("sub_process '{}' spawned child {} (lifecycle={})",
-            subProcess.code(), child.getId(), child.getLifecycle());
+        log.info("sub_process '{}' spawned child {} (lifecycle={}, wait={})",
+            subProcess.code(), child.getId(), child.getLifecycle(), waitForCompletion);
         metricInc("bpm.subprocess.spawned");
+
+        // Fire-and-forget: avanzar el parent INMEDIATAMENTE al siguiente flow_element.
+        // El child sigue su curso; no hay return aquí.
+        if (!waitForCompletion) {
+            consumeAndMoveToNext(instance, token, subProcess, def, userId);
+        }
     }
 
     /**
@@ -1301,6 +1422,23 @@ public class ProcessEngine {
             Tags.of("decision", decisionRef)).increment();
 
         consumeAndMoveToNext(instance, token, brt, def, userId);
+    }
+
+    /**
+     * Audita en el parent que un child fire-and-forget terminó. No avanza
+     * ningún token porque el parent ya pasó al siguiente flow_element cuando
+     * spawnneó al child. Útil para observabilidad/debug.
+     */
+    private void auditFireAndForgetChildCompletion(ProcessInstance child, UUID userId) {
+        ProcessInstance parent = instanceRepo.findById(child.getParentInstanceId()).orElse(null);
+        if (parent == null) {
+            log.debug("auditFireAndForget: parent {} gone", child.getParentInstanceId());
+            return;
+        }
+        audit(parent, "subprocess.detached_completed", null, null, userId, Map.of(
+            "childInstanceId", child.getId().toString(),
+            "childLifecycle", child.getLifecycle()
+        ));
     }
 
     /**
@@ -1560,17 +1698,20 @@ public class ProcessEngine {
     }
 
     /**
-     * B2 — dispara un boundary timer: interrumpe la activity y avanza un
-     * nuevo token por el outgoing del boundary_event.
+     * B2 — dispara un boundary timer: avanza un nuevo token por el outgoing
+     * del boundary_event. Si interrupting=true, además cancela la activity.
      *
-     * Pasos (modo interrupting=true MVP):
-     *   1. Cancelar OTRAS boundary jobs del mismo token (si había varias)
-     *   2. Cancelar la TaskInstance asociada (si hay) → lifecycle=cancelled
-     *   3. Consumir el token de la activity (sigue waiting → consumed)
-     *   4. Crear NUEVO token activo en el outgoing del boundary_event
-     *   5. Avanzar el nuevo token
+     * Pasos:
+     *   1. Cancelar OTRAS boundary jobs del mismo token (siempre, para no
+     *      duplicar disparos si había varios timers adjuntos al mismo activity)
+     *   2. Si interrupting=true: cancelar TaskInstance + consumir activity token
+     *   3. Crear NUEVO token activo en el outgoing del boundary
+     *   4. Avanzar el nuevo token
      *
-     * Si interrupting=false (no-interrupt) → no-op por ahora (queda para futuro).
+     * Non-interrupting (interrupting=false): la activity sigue activa,
+     * solo se emite un token paralelo en el outgoing. El job queda fired
+     * (no re-dispara). Para que vuelva a dispararse en la misma activity
+     * habría que modelar el boundary como timer cíclico (futuro).
      */
     @SuppressWarnings("unchecked")
     private void fireBoundaryTimer(ProcessInstance instance, Token activityToken, JobExecutor job) {
@@ -1582,66 +1723,85 @@ public class ProcessEngine {
         UUID attachedTaskId = cfg.get("attachedTaskInstanceId") == null ? null
             : UUID.fromString((String) cfg.get("attachedTaskInstanceId"));
 
-        if (!interrupting) {
-            // Non-interrupting MVP: solo creamos token paralelo y NO consumimos el activity token
-            log.warn("Non-interrupting boundary {} fired — not implemented in MVP, skipping", boundaryCode);
-            audit(instance, "boundary.skipped_noninterrupt", boundaryElementId,
-                activityToken.getId(), null, Map.of("boundaryCode", boundaryCode));
-            return;
-        }
+        fireBoundaryHandler(instance, activityToken, boundaryElementId, boundaryCode,
+            attachedToCode, attachedTaskId, interrupting,
+            job.getId(),  // skip self cuando cancela siblings
+            "boundary.fired", "boundary_timer_fired",
+            Map.of("trigger", "timer"));
+    }
 
+    /**
+     * Lógica unificada del disparo de un boundary_event (timer OR error/escalation).
+     * - Cancela siblings boundary jobs del activity token (para que no dupliquen)
+     * - Si interrupting: cancela TaskInstance + consumes activity token
+     * - Crea nuevo token en outgoing del boundary y lo avanza
+     *
+     * @param selfJobIdToSkip id del job que dispara actualmente (null si no aplica,
+     *                         como en error boundary que no viene de un job).
+     */
+    private void fireBoundaryHandler(ProcessInstance instance, Token activityToken,
+                                      UUID boundaryElementId, String boundaryCode,
+                                      String attachedToCode, UUID attachedTaskId,
+                                      boolean interrupting, UUID selfJobIdToSkip,
+                                      String auditEvent, String cancelReason,
+                                      Map<String, Object> extraAuditData) {
         OffsetDateTime now = OffsetDateTime.now();
 
-        // 1. Cancelar OTRAS boundary jobs del mismo token (mismo activity)
-        List<JobExecutor> siblings = jobRepo.findByTokenIdAndLifecycle(activityToken.getId(), "scheduled");
+        // 1. Cancelar OTROS boundary jobs scheduled del mismo token. Sólo
+        //    aplica si interrupting=true (sino la activity sigue y los otros
+        //    boundaries deben seguir armados).
         int cancelledSiblings = 0;
-        for (JobExecutor sib : siblings) {
-            if (Objects.equals(sib.getId(), job.getId())) continue;  // skip self (firing)
-            Object boundaryFlag = sib.getConfig() == null ? null : sib.getConfig().get("boundary");
-            if (!Boolean.TRUE.equals(boundaryFlag)) continue;
-            sib.setLifecycle("cancelled");
-            sib.setUpdatedAt(now);
-            jobRepo.save(sib);
-            cancelledSiblings++;
+        if (interrupting) {
+            List<JobExecutor> siblings = jobRepo.findByTokenIdAndLifecycle(activityToken.getId(), "scheduled");
+            for (JobExecutor sib : siblings) {
+                if (selfJobIdToSkip != null && Objects.equals(sib.getId(), selfJobIdToSkip)) continue;
+                Object boundaryFlag = sib.getConfig() == null ? null : sib.getConfig().get("boundary");
+                if (!Boolean.TRUE.equals(boundaryFlag)) continue;
+                sib.setLifecycle("cancelled");
+                sib.setUpdatedAt(now);
+                jobRepo.save(sib);
+                cancelledSiblings++;
+            }
         }
 
-        // 2. Cancelar TaskInstance asociada (si hay)
-        if (attachedTaskId != null) {
-            taskRepo.findById(attachedTaskId).ifPresent(t -> {
-                if (List.of("created", "assigned", "in_progress").contains(t.getLifecycle())) {
-                    t.setLifecycle("cancelled");
-                    t.setUpdatedAt(now);
-                    taskRepo.save(t);
-                    audit(instance, "task.cancelled", t.getFlowelementId(), activityToken.getId(), null,
-                        Map.of("taskInstanceId", t.getId().toString(), "reason", "boundary_timer_fired"));
-                }
-            });
+        // 2. Si interrupting: cancelar TaskInstance + consumir activity token
+        if (interrupting) {
+            if (attachedTaskId != null) {
+                taskRepo.findById(attachedTaskId).ifPresent(t -> {
+                    if (List.of("created", "assigned", "in_progress").contains(t.getLifecycle())) {
+                        t.setLifecycle("cancelled");
+                        t.setUpdatedAt(now);
+                        taskRepo.save(t);
+                        audit(instance, "task.cancelled", t.getFlowelementId(), activityToken.getId(), null,
+                            Map.of("taskInstanceId", t.getId().toString(), "reason", cancelReason));
+                    }
+                });
+            }
+            activityToken.setLifecycle("consumed");
+            activityToken.setUpdatedAt(now);
+            tokenRepo.save(activityToken);
         }
 
-        // 3. Consumir activity token
-        activityToken.setLifecycle("consumed");
-        activityToken.setUpdatedAt(now);
-        tokenRepo.save(activityToken);
-
-        audit(instance, "boundary.fired", boundaryElementId, activityToken.getId(), null, Map.of(
-            "boundaryCode", boundaryCode,
-            "attachedToCode", attachedToCode,
-            "interrupted", true,
-            "cancelledSiblingBoundaries", cancelledSiblings,
-            "cancelledTaskInstanceId", attachedTaskId != null ? attachedTaskId.toString() : "(none)"
-        ));
+        Map<String, Object> auditData = new LinkedHashMap<>();
+        auditData.put("boundaryCode", boundaryCode);
+        auditData.put("attachedToCode", attachedToCode);
+        auditData.put("interrupted", interrupting);
+        auditData.put("cancelledSiblingBoundaries", cancelledSiblings);
+        auditData.put("cancelledTaskInstanceId",
+            (interrupting && attachedTaskId != null) ? attachedTaskId.toString() : "(none)");
+        if (extraAuditData != null) auditData.putAll(extraAuditData);
+        audit(instance, auditEvent, boundaryElementId, activityToken.getId(), null, auditData);
         metricInc("bpm.boundary.fired");
 
-        // 4. Crear nuevo token en outgoing del boundary
+        // 3. Crear nuevo token en outgoing del boundary y avanzar
         ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
         List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(boundaryElementId);
         if (outgoing.isEmpty()) {
             log.warn("boundary_event '{}' has no outgoing flow — instance may stall", boundaryCode);
             return;
         }
-
-        // El boundary token hereda el parent_token_id del activity token (mantiene
-        // el scope de paralelismo si el activity estaba dentro de un SPLIT).
+        // El boundary token hereda el parent_token_id del activity (mantiene scope
+        // de paralelismo si la activity vivía dentro de un SPLIT).
         Token boundaryToken = newToken(instance, outgoing.get(0).targetId(), activityToken.getParentTokenId());
         tokenRepo.save(boundaryToken);
         ProcessDefinition.FlowElement target = def.findElementById(outgoing.get(0).targetId());
@@ -1650,8 +1810,6 @@ public class ProcessEngine {
             "elementType", target != null ? target.type() : "?",
             "fromBoundary", boundaryCode
         ));
-
-        // 5. Avanzar
         advanceToken(instance, boundaryToken, def, null);
     }
 

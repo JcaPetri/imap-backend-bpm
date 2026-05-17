@@ -59,6 +59,31 @@ public record ProcessDefinition(
             .toList();
     }
 
+    /**
+     * Advanced — filtra boundaries adjuntos por errorCode matching para
+     * raiseTaskError. Acepta:
+     *   - boundaries con `error.errorCode == errorCode` (exact match)
+     *   - boundaries con `escalation.escalationCode == errorCode` (escalation flavor)
+     *   - boundaries con `error.errorCode == "*"` o `null` (catch-all)
+     *
+     * Si errorCode == null, retorna solo catch-all.
+     */
+    @SuppressWarnings("unchecked")
+    public List<FlowElement> findErrorBoundariesFor(String elementCode, String errorCode) {
+        return findBoundariesFor(elementCode).stream()
+            .filter(fe -> {
+                Map<String, Object> cfg = fe.config();
+                Map<String, Object> errorCfg = (Map<String, Object>) cfg.get("error");
+                Map<String, Object> escalCfg = (Map<String, Object>) cfg.get("escalation");
+                if (errorCfg == null && escalCfg == null) return false;
+                String declared = errorCfg != null ? (String) errorCfg.get("errorCode")
+                                : (String) escalCfg.get("escalationCode");
+                if (declared == null || "*".equals(declared)) return true;   // catch-all
+                return declared.equals(errorCode);
+            })
+            .toList();
+    }
+
     /** Sequence flows salientes de un flowelement, ordenados. */
     public List<SequenceFlow> outgoingFlows(UUID sourceId) {
         return sequenceFlows.stream()
