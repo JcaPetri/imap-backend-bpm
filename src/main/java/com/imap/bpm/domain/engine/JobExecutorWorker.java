@@ -1,15 +1,12 @@
 package com.imap.bpm.domain.engine;
 
-import com.imap.bpm.infrastructure.entity.JobExecutor;
-import com.imap.bpm.infrastructure.repository.JobExecutorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Worker scheduled del motor BPM. Polea bpm_pro_jobexecutor_tbl cada N
@@ -36,37 +33,34 @@ public class JobExecutorWorker {
     private static final Logger log = LoggerFactory.getLogger(JobExecutorWorker.class);
     private static final int BATCH_SIZE = 50;
 
-    private final JobExecutorRepository jobRepo;
+    private final JobScanService scanService;
     private final ProcessEngine engine;
 
-    public JobExecutorWorker(JobExecutorRepository jobRepo, ProcessEngine engine) {
-        this.jobRepo = jobRepo;
+    public JobExecutorWorker(JobScanService scanService, ProcessEngine engine) {
+        this.scanService = scanService;
         this.engine = engine;
     }
 
     @Scheduled(fixedDelay = 5000, initialDelay = 5000)
     public void tick() {
-        List<JobExecutor> due;
+        List<UUID> dueIds;
         try {
-            due = jobRepo.findDueJobs(OffsetDateTime.now(), PageRequest.of(0, BATCH_SIZE));
+            // El scan corre en tx separada con bypass RLS (el worker no tiene
+            // tenant context). Por cada job ID, fireTimerJob abre su propia tx
+            // con el tenant del job seteado.
+            dueIds = scanService.findDueJobIds(BATCH_SIZE);
         } catch (Exception e) {
-            log.error("JobExecutorWorker tick: findDueJobs failed", e);
+            log.error("JobExecutorWorker tick: findDueJobIds failed", e);
             return;
         }
-        if (due.isEmpty()) return;
+        if (dueIds.isEmpty()) return;
 
-        log.debug("JobExecutorWorker tick: {} due jobs to process", due.size());
-        for (JobExecutor job : due) {
+        log.debug("JobExecutorWorker tick: {} due jobs to process", dueIds.size());
+        for (UUID jobId : dueIds) {
             try {
-                switch (job.getJobType()) {
-                    case "timer" -> engine.fireTimerJob(job.getId());
-                    default -> log.warn("JobExecutorWorker: unsupported job_type '{}' on job {}",
-                        job.getJobType(), job.getId());
-                }
+                engine.fireTimerJob(jobId);
             } catch (Exception e) {
-                // fireTimerJob ya maneja su propio retry; acá solo logueamos
-                // cualquier error que escape al filtro de @Transactional
-                log.error("JobExecutorWorker: uncaught error processing job {}", job.getId(), e);
+                log.error("JobExecutorWorker: uncaught error processing job {}", jobId, e);
             }
         }
     }
