@@ -1389,7 +1389,10 @@ public class ProcessEngine {
             return;
         }
 
-        if (result.matchedRule() == null) {
+        // No-match: ninguna rule matcheó. NOTA: matchedRule==null también
+        // ocurre en collect/rule-order/output-order cuando hubo matches
+        // (multi-output sin "winner"). Discriminar por totalMatched.
+        if (result.totalMatched() == 0) {
             audit(instance, "decision.no_match", brt.id(), token.getId(), userId, Map.of(
                 "elementCode", brt.code(),
                 "decisionRef", decisionRef,
