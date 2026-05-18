@@ -42,6 +42,7 @@ import java.util.*;
  *   POST   /v1/bpm/instance/{id}/cancel             → admin: soft cancel (C1)
  *   DELETE /v1/bpm/instance/{id}                    → admin: cascade delete
  *   POST   /v1/bpm/task/{id}/raise-error            → dispara boundary error/escalation
+ *   GET    /v1/bpm/processversion/{id}/definition   → flowElements + sequenceFlows (para BPMN viewer)
  *
  * Por simplicidad MVP, el endpoint /start recibe el processVersionId directo
  * (no el processdef code). Esto evita una llamada extra a system para resolver
@@ -352,6 +353,73 @@ public class BpmProcessController {
         out.put("signalCode", signalCode);
         out.put("reactivatedTokens", reactivated);
         return out;
+    }
+
+    // ─── ProcessVersion definition (para BPMN visual viewer) ─────────────────
+
+    /**
+     * Devuelve la definition del processversion (flowElements + sequenceFlows
+     * + taskForms) en shape simplificado, listo para que el frontend genere
+     * BPMN XML y lo renderice con bpmn-js.
+     *
+     * Reusa el cache de `ProcessDefinitionLoader` — no llama directamente al
+     * system si la def ya está cacheada. Permite a cualquier user del tenant
+     * (no solo system.admin) ver el diagrama de procesos que están
+     * ejecutándose en su tenant.
+     *
+     * 404 si la def no se puede cargar.
+     */
+    @GetMapping("/processversion/{processversionId}/definition")
+    public ResponseEntity<Map<String, Object>> getProcessversionDefinition(
+            @PathVariable("processversionId") String processversionIdStr,
+            HttpServletRequest req) {
+        UUID processVersionId = UUID.fromString(processversionIdStr);
+        UUID tenantId = TenantContextHolder.get();
+        String bearerToken = extractBearer(req);
+
+        ProcessDefinition def;
+        try {
+            def = loader.load(processVersionId, bearerToken, tenantId);
+        } catch (Exception e) {
+            return ResponseEntity.notFound().build();
+        }
+        if (def == null) return ResponseEntity.notFound().build();
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("processversionId", processVersionId.toString());
+        out.put("processdefId", def.processdefId() != null ? def.processdefId().toString() : null);
+        out.put("processdefCode", def.processdefCode());
+        out.put("processdefName", def.processdefName());
+        out.put("version", def.version());
+
+        List<Map<String, Object>> fes = new ArrayList<>();
+        for (ProcessDefinition.FlowElement fe : def.flowElements()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", fe.id().toString());
+            m.put("code", fe.code());
+            m.put("type", fe.type());
+            m.put("name", fe.name());
+            m.put("config", fe.config());
+            m.put("sortOrder", fe.sortOrder());
+            fes.add(m);
+        }
+        out.put("flowElements", fes);
+
+        List<Map<String, Object>> sfs = new ArrayList<>();
+        for (ProcessDefinition.SequenceFlow sf : def.sequenceFlows()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", sf.id().toString());
+            m.put("sourceId", sf.sourceId().toString());
+            m.put("targetId", sf.targetId().toString());
+            m.put("sourceCode", sf.sourceCode());
+            m.put("targetCode", sf.targetCode());
+            m.put("conditionExpr", sf.conditionExpr());
+            m.put("sortOrder", sf.sortOrder());
+            sfs.add(m);
+        }
+        out.put("sequenceFlows", sfs);
+
+        return ResponseEntity.ok(out);
     }
 
     // ─── Boundary error/escalation manual trigger (advanced) ─────────────────
