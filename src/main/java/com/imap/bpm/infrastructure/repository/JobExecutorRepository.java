@@ -43,5 +43,5 @@ public interface JobExecutorRepository extends JpaRepository<JobExecutor, UUID> 
     @Modifying
     @Transactional
     @Query("DELETE FROM JobExecutor j WHERE j.processinstanceId = :pid")
-    long deleteByProcessinstanceId(@Param("pid") UUID processinstanceId);
+    int deleteByProcessinstanceId(@Param("pid") UUID processinstanceId);
 }
