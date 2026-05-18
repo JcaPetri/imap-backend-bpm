@@ -620,7 +620,7 @@ public class ProcessEngine {
             "targetCode", chosen.targetCode(),
             "conditionExpr", chosen.conditionExpr() == null ? "(default)" : chosen.conditionExpr()
         ));
-        metricInc("bpm.gateway.exclusive");
+        metricInc("bpm.gateway.exclusive", def);
         moveTokenToElement(instance, token, chosen.targetId(), def, userId);
     }
 
@@ -836,7 +836,7 @@ public class ProcessEngine {
                 "gatewayCode", gateway.code(),
                 "branches", outgoing.size()
             ));
-            metricInc("bpm.gateway.split");
+            metricInc("bpm.gateway.split", def);
             for (ProcessDefinition.SequenceFlow sf : outgoing) {
                 Token child = newToken(instance, sf.targetId(), token.getId());
                 tokenRepo.save(child);
@@ -888,7 +888,7 @@ public class ProcessEngine {
                 "gatewayCode", gateway.code(),
                 "branchesJoined", siblings.size()
             ));
-            metricInc("bpm.gateway.join");
+            metricInc("bpm.gateway.join", def);
 
             ProcessDefinition.SequenceFlow out = outgoing.get(0);
             Token outToken = newToken(instance, out.targetId(), grandparent);
@@ -1017,7 +1017,7 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' scheduled timer job {} fireAt={}",
             event.code(), job.getId(), fireAt);
-        metricInc("bpm.timer.scheduled");
+        metricInc("bpm.timer.scheduled", instance.getProcessdefId().toString());
     }
 
     private void handleMessageEvent(ProcessInstance instance, Token token,
@@ -1067,7 +1067,7 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' waiting for message '{}' (key={})",
             event.code(), messageCode, resolvedKey);
-        metricInc("bpm.message.subscribed");
+        metricInc("bpm.message.subscribed", instance.getProcessdefId().toString());
     }
 
     private void handleSignalEvent(ProcessInstance instance, Token token,
@@ -1108,7 +1108,7 @@ public class ProcessEngine {
         ));
         log.info("intermediate_event '{}' subscribed to signal '{}'",
             event.code(), signalCode);
-        metricInc("bpm.signal.subscribed");
+        metricInc("bpm.signal.subscribed", instance.getProcessdefId().toString());
     }
 
     // ─── sub_process (B1 — call activity) ──────────────────────────────────
@@ -1248,7 +1248,7 @@ public class ProcessEngine {
         ));
         log.info("sub_process '{}' spawned child {} (lifecycle={}, wait={})",
             subProcess.code(), child.getId(), child.getLifecycle(), waitForCompletion);
-        metricInc("bpm.subprocess.spawned");
+        metricInc("bpm.subprocess.spawned", def);
 
         // Fire-and-forget: avanzar el parent INMEDIATAMENTE al siguiente flow_element.
         // El child sigue su curso; no hay return aquí.
@@ -1706,7 +1706,7 @@ public class ProcessEngine {
             "elementCode", current.code(),
             "jobId", job.getId().toString()
         ));
-        metricInc("bpm.timer.fired");
+        metricInc("bpm.timer.fired", instance.getProcessdefId().toString());
         consumeAndMoveToNext(instance, token, current, def, null);
     }
 
@@ -1804,7 +1804,7 @@ public class ProcessEngine {
             (interrupting && attachedTaskId != null) ? attachedTaskId.toString() : "(none)");
         if (extraAuditData != null) auditData.putAll(extraAuditData);
         audit(instance, auditEvent, boundaryElementId, activityToken.getId(), null, auditData);
-        metricInc("bpm.boundary.fired");
+        metricInc("bpm.boundary.fired", instance.getProcessdefId().toString());
 
         // 3. Crear nuevo token en outgoing del boundary y avanzar
         ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
