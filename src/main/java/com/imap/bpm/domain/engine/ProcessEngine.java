@@ -1599,19 +1599,11 @@ public class ProcessEngine {
      *
      * Idempotente vía el chequeo de lifecycle del job.
      */
-    /**
-     * Overload usado por JobExecutorWorker: setea el tenant ANTES del
-     * @Transactional para que el applyToCurrentTransaction interno
-     * encuentre el holder ya con el tenant del job.
-     */
-    public void fireTimerJob(UUID jobId, UUID tenantId) {
-        TenantContextHolder.set(tenantId);
-        try {
-            fireTimerJob(jobId);
-        } finally {
-            TenantContextHolder.clear();
-        }
-    }
+    // NOTA: el overload fireTimerJob(jobId, tenantId) fue removido porque
+    // la llamada interna `this.fireTimerJob(jobId)` bypasea el proxy CGLIB
+    // de Spring → @Transactional no se aplica → MANDATORY falla. El caller
+    // (JobExecutorWorker) debe pre-setear TenantContextHolder + BearerTokenHolder
+    // ANTES de invocar fireTimerJob(jobId).
 
     @Transactional
     public void fireTimerJob(UUID jobId) {

@@ -2,6 +2,7 @@ package com.imap.bpm.domain.engine;
 
 import com.imap.bpm.infrastructure.security.BearerTokenHolder;
 import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
+import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -63,17 +64,24 @@ public class JobExecutorWorker {
 
         log.debug("JobExecutorWorker tick: {} due jobs to process", dueJobs.size());
 
-        // Pre-setear service token para que ProcessDefinitionLoader/DecisionLoader
-        // puedan hacer s2s call al system si hay cache miss durante advanceToken.
-        // El worker no tiene JWT del user (corre en thread scheduled).
+        // Pre-setear tenant + service token ANTES de invocar fireTimerJob.
+        // - Tenant: necesario para que applyToCurrentTransaction (RLS) cargue
+        //   el row del job correcto (sin esto, RLS filtra y devuelve null).
+        // - Service token: para que ProcessDefinitionLoader/DecisionLoader
+        //   puedan hacer s2s call al system si hay cache miss durante
+        //   advanceToken (el worker no tiene JWT del user).
+        // Importante: llamar engine.fireTimerJob(jobId) — Spring CGLIB proxy
+        // intercepta llamadas externas y aplica @Transactional correctamente.
         String svcToken = serviceTokenProvider.currentToken();
         for (JobScanService.DueJob d : dueJobs) {
             try {
+                TenantContextHolder.set(d.tenantId());
                 BearerTokenHolder.set(svcToken);
-                engine.fireTimerJob(d.jobId(), d.tenantId());
+                engine.fireTimerJob(d.jobId());
             } catch (Exception e) {
                 log.error("JobExecutorWorker: uncaught error processing job {}", d.jobId(), e);
             } finally {
+                TenantContextHolder.clear();
                 BearerTokenHolder.clear();
             }
         }
