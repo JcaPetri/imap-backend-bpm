@@ -2,8 +2,10 @@ package com.imap.bpm.infrastructure.repository;
 
 import com.imap.bpm.infrastructure.entity.JobExecutor;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -30,6 +32,16 @@ public interface JobExecutorRepository extends JpaRepository<JobExecutor, UUID> 
     List<JobExecutor> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
     List<JobExecutor> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
 
-    /** Para cascade DELETE de instance (admin cleanup). */
-    long deleteByProcessinstanceId(UUID processinstanceId);
+    /**
+     * Cascade DELETE de instance (admin cleanup).
+     *
+     * Bulk DELETE via JPQL @Modifying (no entity lifecycle), evita
+     * StaleObjectStateException en race con worker tick: el derived
+     * deleteByXxx hace findAll + em.remove → optimistic lock check por
+     * row. Esta versión hace un solo DELETE SQL atómico.
+     */
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM JobExecutor j WHERE j.processinstanceId = :pid")
+    long deleteByProcessinstanceId(@Param("pid") UUID processinstanceId);
 }
