@@ -11,34 +11,47 @@ import java.util.*;
  * los operadores declarativos definidos en cada `RuleInput` contra el mapa
  * de variables del processinstance, y aplica el hit policy.
  *
- * MVP B3:
- *   - Operadores: any | eq | ne | lt | lte | gt | gte | in | between
- *   - Hit policies: unique | first
+ * Hit policies soportadas:
+ *   - unique        — exactamente 1 match; si ≥2 → error
+ *   - first         — primer match por orden de priority asc
+ *   - priority      — match con mayor `priority` numérico gana
+ *   - any           — todos los matched deben dar el MISMO output; si discrepan → error
+ *   - collect       — outputs combinados como List<value> por var (orden no preservado)
+ *   - rule-order    — outputs combinados como List<value> en orden de las rules (priority asc)
+ *   - output-order  — outputs combinados como List<value> ordenado por value asc
  *
- * Diferido para iter futura: priority/collect/rule-order/any, FEEL real,
- * decision tables anidadas (DRD).
+ * Operadores: any | eq | ne | lt | lte | gt | gte | in | between
  *
- * Convención de tipos: comparaciones numéricas convierten Object→Double con
- * tolerancia. Si la conversión falla, el operador retorna false (no rompe).
- * Igualdad usa String.valueOf() para flexibilidad cross-type.
+ * Diferido: FEEL real, decision tables anidadas (DRD).
  */
 @Service
 public class DmnEvaluator {
 
     private static final Logger log = LoggerFactory.getLogger(DmnEvaluator.class);
 
+    /**
+     * Result del evaluate.
+     *
+     * - `matchedRule`: la rule "ganadora" en políticas single (unique/first/
+     *    priority/any). Null si no hubo match O si la política es multi
+     *    (collect/rule-order/output-order).
+     * - `outputs`: map varName→value. Para single: value es escalar. Para
+     *    multi: value es List<Object>.
+     * - `totalMatched`: cuántas rules matchearon en total.
+     * - `allMatched`: las rules matched (para auditoría).
+     */
     public record EvaluationResult(
         DecisionDefinition.Rule matchedRule,
         Map<String, Object> outputs,
-        int totalMatched
+        int totalMatched,
+        List<DecisionDefinition.Rule> allMatched
     ) {}
 
     /**
      * Evalúa la decision contra el mapa de inputs (vars del processinstance).
-     * Devuelve EvaluationResult con la rule que ganó (según hit_policy) y
-     * el output map. Si no hay matches, devuelve EvaluationResult vacío.
-     *
-     * Lanza IllegalStateException si hit_policy=unique y matchearon ≥2 rules.
+     * Lanza IllegalStateException si:
+     *   - hit_policy=unique y matchearon ≥2 rules
+     *   - hit_policy=any y los outputs de las matched no son idénticos
      */
     public EvaluationResult evaluate(DecisionDefinition def, Map<String, Object> inputs) {
         List<DecisionDefinition.Rule> matched = new ArrayList<>();
@@ -49,35 +62,104 @@ public class DmnEvaluator {
         }
 
         String policy = def.hitPolicy() == null ? "first" : def.hitPolicy().toLowerCase();
-        DecisionDefinition.Rule winner;
+
+        if (matched.isEmpty()) {
+            return new EvaluationResult(null, new LinkedHashMap<>(), 0, List.of());
+        }
 
         switch (policy) {
             case "unique" -> {
                 if (matched.size() > 1) {
                     throw new IllegalStateException("DMN unique hit policy violated for decision '"
-                        + def.code() + "': " + matched.size() + " rules matched (rules priorities="
+                        + def.code() + "': " + matched.size() + " rules matched (priorities="
                         + matched.stream().map(r -> String.valueOf(r.priority())).toList() + ")");
                 }
-                winner = matched.isEmpty() ? null : matched.get(0);
+                return singleResult(matched.get(0), matched);
             }
             case "first" -> {
-                // rules vienen ordenadas por priority en el loader
-                winner = matched.isEmpty() ? null : matched.get(0);
+                // rules ya ordenadas por priority asc en el loader
+                return singleResult(matched.get(0), matched);
+            }
+            case "priority" -> {
+                // Mayor priority numérico gana. Si ties, el último insertado.
+                DecisionDefinition.Rule winner = matched.stream()
+                    .max(Comparator.comparingInt(DecisionDefinition.Rule::priority))
+                    .orElse(matched.get(0));
+                return singleResult(winner, matched);
+            }
+            case "any" -> {
+                // Todos los matched deben dar EL MISMO output. Si discrepan → error.
+                Map<String, Object> first = ruleOutputsToMap(matched.get(0));
+                for (int i = 1; i < matched.size(); i++) {
+                    Map<String, Object> other = ruleOutputsToMap(matched.get(i));
+                    if (!first.equals(other)) {
+                        throw new IllegalStateException("DMN 'any' hit policy violated for decision '"
+                            + def.code() + "': rules priority=" + matched.get(0).priority()
+                            + " vs priority=" + matched.get(i).priority()
+                            + " disagree on output (any requires all matches return same output).");
+                    }
+                }
+                return singleResult(matched.get(0), matched);
+            }
+            case "collect" -> {
+                // Outputs combinados como List<value>. Orden no preservado pero
+                // implementación práctica usa orden de matched.
+                return multiResult(matched, false);
+            }
+            case "rule-order", "rule_order", "ruleorder" -> {
+                // Como collect pero preservando explícitamente orden de las rules.
+                // (matched ya viene en orden de rules; lo dejamos igual.)
+                return multiResult(matched, false);
+            }
+            case "output-order", "output_order", "outputorder" -> {
+                // Como collect pero list ordenada por value asc (per output).
+                return multiResult(matched, true);
             }
             default -> {
                 log.warn("Unsupported hit policy '{}' for decision '{}' — falling back to 'first'",
                     policy, def.code());
-                winner = matched.isEmpty() ? null : matched.get(0);
+                return singleResult(matched.get(0), matched);
             }
         }
+    }
 
-        Map<String, Object> outputs = new LinkedHashMap<>();
-        if (winner != null) {
-            for (DecisionDefinition.RuleOutput out : winner.outputs()) {
-                outputs.put(out.varName(), out.value());
+    private EvaluationResult singleResult(DecisionDefinition.Rule winner,
+                                          List<DecisionDefinition.Rule> matched) {
+        Map<String, Object> outputs = ruleOutputsToMap(winner);
+        return new EvaluationResult(winner, outputs, matched.size(), matched);
+    }
+
+    /**
+     * Multi-output: combina outputs de todas las rules matched en List<value>
+     * por var. Si `sortByValue=true`, ordena cada lista ascendente.
+     */
+    @SuppressWarnings({"unchecked","rawtypes"})
+    private EvaluationResult multiResult(List<DecisionDefinition.Rule> matched, boolean sortByValue) {
+        Map<String, List<Object>> agg = new LinkedHashMap<>();
+        for (DecisionDefinition.Rule rule : matched) {
+            for (DecisionDefinition.RuleOutput out : rule.outputs()) {
+                agg.computeIfAbsent(out.varName(), k -> new ArrayList<>()).add(out.value());
             }
         }
-        return new EvaluationResult(winner, outputs, matched.size());
+        if (sortByValue) {
+            for (List<Object> list : agg.values()) {
+                list.sort((a, b) -> {
+                    if (a instanceof Comparable && b instanceof Comparable && a.getClass() == b.getClass()) {
+                        return ((Comparable) a).compareTo(b);
+                    }
+                    return String.valueOf(a).compareTo(String.valueOf(b));
+                });
+            }
+        }
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Object>> e : agg.entrySet()) outputs.put(e.getKey(), e.getValue());
+        return new EvaluationResult(null, outputs, matched.size(), matched);
+    }
+
+    private Map<String, Object> ruleOutputsToMap(DecisionDefinition.Rule rule) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (DecisionDefinition.RuleOutput o : rule.outputs()) out.put(o.varName(), o.value());
+        return out;
     }
 
     /** Una rule matchea si TODOS sus inputs matchean. */

@@ -1407,17 +1407,18 @@ public class ProcessEngine {
             setVariable(instance, e.getKey(), e.getValue());
         }
 
-        audit(instance, "decision.evaluated", brt.id(), token.getId(), userId, Map.of(
-            "elementCode", brt.code(),
-            "decisionRef", decisionRef,
-            "hitPolicy", decision.hitPolicy(),
-            "matchedRulePriority", result.matchedRule().priority(),
-            "totalMatched", result.totalMatched(),
-            "inputs", inputs,
-            "outputs", result.outputs()
-        ));
-        log.info("business_rule_task '{}' decision '{}' → rule priority={} outputs={}",
-            brt.code(), decisionRef, result.matchedRule().priority(), result.outputs());
+        Map<String, Object> auditData = new LinkedHashMap<>();
+        auditData.put("elementCode", brt.code());
+        auditData.put("decisionRef", decisionRef);
+        auditData.put("hitPolicy", decision.hitPolicy());
+        auditData.put("matchedRulePriority", result.matchedRule() != null
+            ? result.matchedRule().priority() : -1);   // -1 cuando multi-output (collect/rule-order/output-order)
+        auditData.put("totalMatched", result.totalMatched());
+        auditData.put("inputs", inputs);
+        auditData.put("outputs", result.outputs());
+        audit(instance, "decision.evaluated", brt.id(), token.getId(), userId, auditData);
+        log.info("business_rule_task '{}' decision '{}' → totalMatched={} outputs={}",
+            brt.code(), decisionRef, result.totalMatched(), result.outputs());
         meterRegistry.counter("bpm.decision.evaluated",
             Tags.of("decision", decisionRef)).increment();
 
