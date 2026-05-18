@@ -1,12 +1,13 @@
 package com.imap.bpm.domain.engine;
 
+import com.imap.bpm.infrastructure.security.BearerTokenHolder;
+import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.UUID;
 
 /**
  * Worker scheduled del motor BPM. Polea bpm_pro_jobexecutor_tbl cada N
@@ -35,33 +36,45 @@ public class JobExecutorWorker {
 
     private final JobScanService scanService;
     private final ProcessEngine engine;
+    private final BpmServiceTokenProvider serviceTokenProvider;
 
-    public JobExecutorWorker(JobScanService scanService, ProcessEngine engine) {
+    public JobExecutorWorker(JobScanService scanService,
+                             ProcessEngine engine,
+                             BpmServiceTokenProvider serviceTokenProvider) {
         this.scanService = scanService;
         this.engine = engine;
+        this.serviceTokenProvider = serviceTokenProvider;
     }
 
     @Scheduled(fixedDelay = 5000, initialDelay = 5000)
     public void tick() {
         List<JobScanService.DueJob> dueJobs;
         try {
-            // El scan corre en tx separada con bypass RLS (el worker no tiene
-            // tenant context). Devuelve pares (jobId, tenantId) para que
-            // fireTimerJob setee el tenant ANTES del findById (sino RLS
-            // filtraría y devolvería null).
-            dueJobs = scanService.findDueJobIds(BATCH_SIZE);
+            // Claim atómico (SELECT FOR UPDATE SKIP LOCKED + UPDATE firing):
+            // marca los jobs como 'firing' antes de procesar, así
+            // cancelBoundaryJobsForToken (que filtra por 'scheduled') no los
+            // toca → 0 race con StaleObjectStateException.
+            dueJobs = scanService.claimDueJobs(BATCH_SIZE);
         } catch (Exception e) {
-            log.error("JobExecutorWorker tick: findDueJobIds failed", e);
+            log.error("JobExecutorWorker tick: claimDueJobs failed", e);
             return;
         }
         if (dueJobs.isEmpty()) return;
 
         log.debug("JobExecutorWorker tick: {} due jobs to process", dueJobs.size());
+
+        // Pre-setear service token para que ProcessDefinitionLoader/DecisionLoader
+        // puedan hacer s2s call al system si hay cache miss durante advanceToken.
+        // El worker no tiene JWT del user (corre en thread scheduled).
+        String svcToken = serviceTokenProvider.currentToken();
         for (JobScanService.DueJob d : dueJobs) {
             try {
+                BearerTokenHolder.set(svcToken);
                 engine.fireTimerJob(d.jobId(), d.tenantId());
             } catch (Exception e) {
                 log.error("JobExecutorWorker: uncaught error processing job {}", d.jobId(), e);
+            } finally {
+                BearerTokenHolder.clear();
             }
         }
     }

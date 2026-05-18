@@ -1624,19 +1624,20 @@ public class ProcessEngine {
             log.warn("fireTimerJob: job {} not found", jobId);
             return;
         }
-        if (!"scheduled".equals(job.getLifecycle())) {
-            log.debug("fireTimerJob: job {} not scheduled (lifecycle={}) — skip",
+        // Aceptar tanto 'firing' (claimed por el worker scan) como 'scheduled'
+        // (legacy/test path). Si está en otro estado (cancelled/fired), skip.
+        if (!"firing".equals(job.getLifecycle()) && !"scheduled".equals(job.getLifecycle())) {
+            log.debug("fireTimerJob: job {} not active (lifecycle={}) — skip",
                 jobId, job.getLifecycle());
             return;
         }
 
-        // (tenant ya aplicado al inicio del método — el caller pre-setea
-        // el TenantContextHolder con el tenant del job antes de invocar.)
-
         OffsetDateTime now = OffsetDateTime.now();
-        job.setLifecycle("firing");
-        job.setUpdatedAt(now);
-        jobRepo.save(job);
+        if (!"firing".equals(job.getLifecycle())) {
+            job.setLifecycle("firing");
+            job.setUpdatedAt(now);
+            jobRepo.save(job);
+        }
 
         try {
             ProcessInstance instance = instanceRepo.findById(job.getProcessinstanceId()).orElse(null);
