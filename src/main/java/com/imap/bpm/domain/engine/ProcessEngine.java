@@ -1953,8 +1953,16 @@ public class ProcessEngine {
             if (data != null) {
                 if (data.containsKey("elementCode")) payload.put("flowElementCode", data.get("elementCode"));
                 if (data.containsKey("elementType")) payload.put("flowElementType", data.get("elementType"));
-                if (data.containsKey("taskId"))      payload.put("taskId", data.get("taskId"));
+                if (data.containsKey("taskInstanceId")) payload.put("taskId", data.get("taskInstanceId"));
                 if (data.containsKey("reason"))      payload.put("reason", data.get("reason"));
+                // Caso #3 (notifs in-app): incluir userIds para que frontend filtre
+                // los eventos por currentUserId.
+                if (data.containsKey("assignedUserId")) payload.put("assignedUserId", data.get("assignedUserId"));
+            }
+            // starterUserId siempre disponible desde la instance — útil para
+            // notifs de "tu proceso completó/cancelló".
+            if (instance.getStartedById() != null) {
+                payload.put("starterUserId", instance.getStartedById().toString());
             }
             sseBus.broadcast(sseEvent, payload);
         } catch (Exception e) {
