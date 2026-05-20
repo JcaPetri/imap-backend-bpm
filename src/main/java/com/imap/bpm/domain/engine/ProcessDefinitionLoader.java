@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.imap.bpm.infrastructure.security.BearerTokenHolder;
+import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,8 +24,15 @@ import java.util.*;
  *
  * Llama: GET https://imaps.com.ar/imap/system/v1/admin/bpm/processversion/{id}/full
  *
- * El JWT se propaga del request actual via Authorization header del WebClient
- * (Spring WebFlux). En MVP usamos el header del request bpm (no service-account).
+ * Autenticación s2s: usa SIEMPRE el service token de BpmServiceTokenProvider
+ * (no el bearer del request original). El endpoint del system está bajo
+ * `/v1/admin/**` que requiere `system.admin`; un user normal lanzando una
+ * instance NO tiene ese permiso, pero el service token sí. Fix 2026-05-19
+ * commit que cierra bug: usuarios sin system.admin recibían 403 al arrancar
+ * instances aunque tuvieran membership válida en el tenant del motor.
+ *
+ * Si service token está DISABLED (jwt.access.secret no configurado), fallback
+ * al bearer del request — preserva comportamiento legacy de smoke tests.
  */
 @Service
 public class ProcessDefinitionLoader {
@@ -34,12 +42,15 @@ public class ProcessDefinitionLoader {
     private final WebClient http;
     private final ObjectMapper jackson;
     private final Cache<UUID, ProcessDefinition> cache;
+    private final BpmServiceTokenProvider serviceTokenProvider;
 
     public ProcessDefinitionLoader(@Value("${imap.system.base-url:http://localhost:8092/imap/system}")
                                    String systemBaseUrl,
-                                   ObjectMapper jackson) {
+                                   ObjectMapper jackson,
+                                   BpmServiceTokenProvider serviceTokenProvider) {
         this.http = WebClient.builder().baseUrl(systemBaseUrl).build();
         this.jackson = jackson;
+        this.serviceTokenProvider = serviceTokenProvider;
         this.cache = Caffeine.newBuilder()
             .maximumSize(200)
             .expireAfterWrite(Duration.ofDays(365))   // efectivamente infinito
@@ -58,9 +69,13 @@ public class ProcessDefinitionLoader {
         }
         log.info("ProcessDefinitionLoader cache MISS — fetching {} from system", processVersionId);
 
-        // Fallback al BearerTokenHolder cuando no nos pasaron bearer en la
-        // signature (común durante advanceToken recursivo, fireTimerJob, etc).
-        final String effectiveBearer = bearerToken != null ? bearerToken : BearerTokenHolder.get();
+        // S2S al system con SERVICE TOKEN (no el bearer del request original).
+        // El endpoint requiere system.admin que el service token siempre tiene.
+        // Fallback al bearer del request si service token disabled (legacy).
+        final String svcToken = serviceTokenProvider.currentToken();
+        final String effectiveBearer = svcToken != null
+            ? svcToken
+            : (bearerToken != null ? bearerToken : BearerTokenHolder.get());
         Map<String, Object> resp = http.get()
             .uri("/v1/admin/bpm/processversion/{id}/full", processVersionId.toString())
             .headers(h -> {

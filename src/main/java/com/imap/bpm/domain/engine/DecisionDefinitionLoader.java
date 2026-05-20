@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.imap.bpm.infrastructure.security.BearerTokenHolder;
+import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -36,12 +37,15 @@ public class DecisionDefinitionLoader {
     private final WebClient http;
     private final ObjectMapper jackson;
     private final Cache<String, DecisionDefinition> cache;
+    private final BpmServiceTokenProvider serviceTokenProvider;
 
     public DecisionDefinitionLoader(@Value("${imap.system.base-url:http://localhost:8092/imap/system}")
                                     String systemBaseUrl,
-                                    ObjectMapper jackson) {
+                                    ObjectMapper jackson,
+                                    BpmServiceTokenProvider serviceTokenProvider) {
         this.http = WebClient.builder().baseUrl(systemBaseUrl).build();
         this.jackson = jackson;
+        this.serviceTokenProvider = serviceTokenProvider;
         this.cache = Caffeine.newBuilder()
             .maximumSize(200)
             .expireAfterWrite(Duration.ofDays(365))
@@ -56,10 +60,13 @@ public class DecisionDefinitionLoader {
         }
         log.info("DecisionDefinitionLoader cache MISS — fetching '{}' from system", decisionCode);
 
-        // Fallback: si no nos pasaron bearer, leerlo del request actual (B3 — la
-        // mayoría de cache misses ocurren durante advanceToken donde el bearer
-        // no llega por la signature). Ver BearerTokenHolder doc.
-        final String effectiveBearer = bearerToken != null ? bearerToken : BearerTokenHolder.get();
+        // S2S al system con SERVICE TOKEN — endpoint requiere system.admin que
+        // el user request original puede no tener. Fix 2026-05-19, mismo
+        // patrón que ProcessDefinitionLoader.
+        final String svcToken = serviceTokenProvider.currentToken();
+        final String effectiveBearer = svcToken != null
+            ? svcToken
+            : (bearerToken != null ? bearerToken : BearerTokenHolder.get());
         Map<String, Object> resp = http.get()
             .uri("/v1/admin/bpm/decisiondef/by-code/{code}/full", decisionCode)
             .headers(h -> {
