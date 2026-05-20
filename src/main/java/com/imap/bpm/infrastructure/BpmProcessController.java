@@ -570,6 +570,10 @@ public class BpmProcessController {
             r.put("endedAt", i.getEndedAt());
             r.put("parentInstanceId", i.getParentInstanceId() != null
                 ? i.getParentInstanceId().toString() : null);
+            // Hito 2 multi-version visibility: incluir processversionId
+            // para que frontend muestre la version que arrancó cada instance.
+            r.put("processversionId", i.getProcessversionId() != null
+                ? i.getProcessversionId().toString() : null);
             out.add(r);
         }
         return out;
