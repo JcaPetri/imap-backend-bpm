@@ -83,6 +83,7 @@ public class ProcessEngine {
     private final MeterRegistry meterRegistry;
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
+    private final com.imap.bpm.infrastructure.sse.SseEventBus sseBus;
 
     public ProcessEngine(ProcessDefinitionLoader loader,
                          ProcessInstanceRepository instanceRepo,
@@ -96,7 +97,8 @@ public class ProcessEngine {
                          DecisionDefinitionLoader decisionLoader,
                          DmnEvaluator dmnEvaluator,
                          MeterRegistry meterRegistry,
-                         ObjectMapper jackson) {
+                         ObjectMapper jackson,
+                         com.imap.bpm.infrastructure.sse.SseEventBus sseBus) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -110,6 +112,7 @@ public class ProcessEngine {
         this.dmnEvaluator = dmnEvaluator;
         this.meterRegistry = meterRegistry;
         this.jackson = jackson;
+        this.sseBus = sseBus;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -1918,6 +1921,47 @@ public class ProcessEngine {
         al.setCreatedAt(now);
         al.setUpdatedAt(now);
         auditRepo.save(al);
+
+        // Hook SSE — publica eventos relevantes para token highlighting live.
+        // El frontend (ProcessDiagram) filtra por instanceId + actualiza markers.
+        publishSseEvent(instance, eventType, data, now);
+    }
+
+    /**
+     * Whitelist de event types que se publican via SSE. NO publica todos para
+     * evitar ruido (audit log tiene ~30 event types, frontend solo necesita 5).
+     */
+    private void publishSseEvent(ProcessInstance instance, String eventType,
+                                  Map<String, Object> data, OffsetDateTime ts) {
+        String sseEvent = switch (eventType) {
+            case "token.entered"    -> "bpm.token.entered";
+            case "task.created"     -> "bpm.task.created";
+            case "task.completed"   -> "bpm.task.completed";
+            case "instance.ended"   -> "bpm.instance.completed";
+            case "instance.cancelled" -> "bpm.instance.cancelled";
+            default -> null;
+        };
+        if (sseEvent == null) return;
+        try {
+            Map<String, Object> payload = new java.util.HashMap<>();
+            payload.put("instanceId", instance.getId().toString());
+            payload.put("processdefId", instance.getProcessdefId() == null
+                ? null : instance.getProcessdefId().toString());
+            payload.put("ts", ts.toInstant().toEpochMilli());
+            // El elementCode/elementType vienen en `data` (lo agrega cada call site).
+            // Pasamos solo lo necesario para mantener payload chico.
+            if (data != null) {
+                if (data.containsKey("elementCode")) payload.put("flowElementCode", data.get("elementCode"));
+                if (data.containsKey("elementType")) payload.put("flowElementType", data.get("elementType"));
+                if (data.containsKey("taskId"))      payload.put("taskId", data.get("taskId"));
+                if (data.containsKey("reason"))      payload.put("reason", data.get("reason"));
+            }
+            sseBus.broadcast(sseEvent, payload);
+        } catch (Exception e) {
+            // SSE no debe romper el flow del motor — log y continúa
+            log.warn("SSE publish failed for event {} instance {}: {}",
+                sseEvent, instance.getId(), e.getMessage());
+        }
     }
 
     private ProcessInstance newInstance(ProcessDefinition def, UUID tenantId, UUID userId) {
