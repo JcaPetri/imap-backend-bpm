@@ -28,4 +28,7 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, UUID
 
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);
+
+    /** Hito 3 — migration: cancelar tasks asociadas al token cuando 'skip' action. */
+    List<TaskInstance> findByTokenIdAndLifecycleIn(UUID tokenId, List<String> lifecycles);
 }

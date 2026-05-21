@@ -643,7 +643,13 @@ public class BpmProcessController {
 
     private ProcessDefinition safeLoad(UUID processVersionId, String bearer, UUID tenantId) {
         try {
-            return loader.load(processVersionId, bearer, tenantId);
+            // ProcessVersions viven en SYSTEM tenant (catalog cross-tenant), no
+            // en el tenant del user/instance. Pasar tenantId del caller hace que
+            // el loader s2s con X-Tenant-Id=callerTenant y SYSTEM TenantContextFilter
+            // rechaza al BPM service user (no es member de tenants operativos).
+            // El `tenantId` param queda en la signature por compat — ignorado en favor
+            // de SYSTEM_TENANT_ID.
+            return loader.load(processVersionId, bearer, TenantContextHolder.SYSTEM_TENANT_ID);
         } catch (Exception e) {
             // Si system no responde, igual devolvemos la metadata local sin defs
             return null;

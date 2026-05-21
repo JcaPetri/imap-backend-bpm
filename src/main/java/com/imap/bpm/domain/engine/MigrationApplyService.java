@@ -37,7 +37,9 @@ import java.util.*;
  *      b. Match con regla por currentElement code → action:
  *          - map: token.currentElementId = target flowElement.id (en v2)
  *          - cancel: token.lifecycle = cancelled
- *          - skip: NO IMPLEMENTADO V1 (tratado como cancel + warning)
+ *          - skip: token movido al targetCode en v2 + ProcessEngine.skipForMigration()
+ *                  cancela tasks asociadas + avanza al outgoing del target. El motor
+ *                  cascadea hasta el siguiente wait state (user_task / timer / etc.).
  *      c. instance.processversionId = targetPvId
  *      d. audit "instance.migrated" con {fromPvId, toPvId, planId}
  *      e. SSE broadcast bpm.instance.migrated
@@ -61,6 +63,7 @@ public class MigrationApplyService {
     private final TokenRepository tokenRepo;
     private final AuditLogRepository auditRepo;
     private final ProcessDefinitionLoader defLoader;
+    private final ProcessEngine processEngine;
     private final BpmServiceTokenProvider serviceTokenProvider;
     private final SseEventBus sseBus;
     private final EavTenantSession tenantSession;
@@ -71,6 +74,7 @@ public class MigrationApplyService {
                                  TokenRepository tokenRepo,
                                  AuditLogRepository auditRepo,
                                  ProcessDefinitionLoader defLoader,
+                                 ProcessEngine processEngine,
                                  BpmServiceTokenProvider serviceTokenProvider,
                                  SseEventBus sseBus,
                                  EavTenantSession tenantSession,
@@ -80,6 +84,7 @@ public class MigrationApplyService {
         this.tokenRepo = tokenRepo;
         this.auditRepo = auditRepo;
         this.defLoader = defLoader;
+        this.processEngine = processEngine;
         this.serviceTokenProvider = serviceTokenProvider;
         this.sseBus = sseBus;
         this.tenantSession = tenantSession;
@@ -171,36 +176,49 @@ public class MigrationApplyService {
                         continue;
                     }
                     String action = (String) rule.get("action");
-                    if ("cancel".equals(action) || "skip".equals(action)) {
-                        // skip tratado como cancel en V1 (TODO: implementar advance)
-                        if ("skip".equals(action)) {
-                            warnings.add("'skip' action not implemented in V1 — treated as cancel for token "
-                                + tk.getId());
-                        }
+                    if ("cancel".equals(action)) {
                         tk.setLifecycle("cancelled");
                         tk.setUpdatedAt(now);
                         tokenRepo.save(tk);
                         tokensCancelled++;
                     } else {
-                        // map: resolver target code → target flowElement id
+                        // map | skip: ambos requieren targetFlowElementCode válido en v2
                         String tgtCode = (String) rule.get("targetFlowElementCode");
                         UUID tgtId = tgtCode == null ? null : targetCodeToId.get(tgtCode);
                         if (tgtId == null) {
                             errors.add("Instance " + inst.getId() + " token at '" + currentCode
-                                + "' map target '" + tgtCode + "' not found in v2 def");
+                                + "' " + action + " target '" + tgtCode + "' not found in v2 def");
                             continue;
                         }
+                        // Mover el token al targetCode en v2
                         tk.setCurrentElementId(tgtId);
                         tk.setUpdatedAt(now);
                         tokenRepo.save(tk);
+
+                        if ("skip".equals(action)) {
+                            // skip: salta este flowElement avanzando al outgoing en v2.
+                            // Requiere que el instance.processversionId ya esté en v2
+                            // (consumeAndMoveToNext puede triggerear queries de outgoing).
+                            if (!targetPvId.equals(inst.getProcessversionId())) {
+                                inst.setProcessversionId(targetPvId);
+                                inst.setUpdatedAt(now);
+                                instanceRepo.save(inst);
+                            }
+                            ProcessDefinition.FlowElement tgtEl = targetDef.findElementById(tgtId);
+                            processEngine.skipForMigration(inst, tk, tgtEl, targetDef, appliedBy);
+                        }
+                        // map o skip ambos cuentan como "mapped" (el token quedó vivo
+                        // en v2; skip además avanzó al siguiente paso automáticamente).
                         tokensMapped++;
                     }
                 }
 
-                // Update instance.processversionId al target
-                inst.setProcessversionId(targetPvId);
-                inst.setUpdatedAt(now);
-                instanceRepo.save(inst);
+                // Update instance.processversionId al target (idempotente si skip ya lo hizo)
+                if (!targetPvId.equals(inst.getProcessversionId())) {
+                    inst.setProcessversionId(targetPvId);
+                    inst.setUpdatedAt(now);
+                    instanceRepo.save(inst);
+                }
 
                 // Audit — usa el patrón JPA standard (mismo que ProcessEngine.audit())
                 // para evitar mismatches con columnas/Hibernate type handlers.

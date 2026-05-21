@@ -167,7 +167,10 @@ public class ProcessEngine {
                                                   UUID userId,
                                                   UUID parentInstanceId,
                                                   UUID parentTokenId) {
-        ProcessDefinition def = loader.load(processVersionId, bearerToken, tenantId);
+        // ProcessVersions viven en SYSTEM tenant (catalog cross-tenant). Pasar
+        // SYSTEM_TENANT_ID en el s2s; el `tenantId` param se usa para crear la
+        // instance + RLS en queries locales del schema bpm (no afecta este load).
+        ProcessDefinition def = loader.load(processVersionId, bearerToken, TenantContextHolder.SYSTEM_TENANT_ID);
         log.info("Starting process {} (v{}) for user {} parent={}",
             def.processdefCode(), def.version(), userId, parentInstanceId);
 
@@ -272,7 +275,7 @@ public class ProcessEngine {
                 token.setLifecycle("active");
                 token.setUpdatedAt(now);
                 tokenRepo.save(token);
-                ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
+                ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, TenantContextHolder.SYSTEM_TENANT_ID);
                 ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
                 if (current != null) {
                     consumeAndMoveToNext(instance, token, current, def, userId);
@@ -352,6 +355,54 @@ public class ProcessEngine {
                 token.setLifecycle("waiting");
                 tokenRepo.save(token);
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // skipForMigration — Hito 3 'skip' action support
+    // ════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Skip = "saltar este flowElement y avanzar al siguiente" durante una
+     * migration plan apply. Cancela tasks/boundary jobs asociados al token,
+     * audita el evento, y dispara `consumeAndMoveToNext` para que el motor
+     * avance al outgoing del `skipElement` en `targetDef` (v2).
+     *
+     * Llamado por MigrationApplyService cuando la regla tiene action='skip'.
+     * El skipElement debe ser un flowElement de v2 (targetCode); el token ya
+     * tiene currentElementId=skipElement.id seteado antes de llamar.
+     *
+     * Semántica: como si el user hubiera completado la activity sin output.
+     */
+    public void skipForMigration(ProcessInstance instance, Token token,
+                                  ProcessDefinition.FlowElement skipElement,
+                                  ProcessDefinition targetDef, UUID userId) {
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // 1. Cancelar tasks vivas del token (asumimos que el skip implica
+        //    cerrar la activity en curso). Si no hay tasks, no-op.
+        List<TaskInstance> activeTasks = taskRepo.findByTokenIdAndLifecycleIn(
+            token.getId(), List.of("created", "reserved", "assigned", "in_progress"));
+        for (TaskInstance t : activeTasks) {
+            t.setLifecycle("cancelled");
+            t.setCompletedAt(now);
+            t.setUpdatedAt(now);
+            taskRepo.save(t);
+        }
+
+        // 2. Cancelar boundary jobs del token (B2) — evita que disparen
+        //    timers después del skip.
+        int cancelledJobs = cancelBoundaryJobsForToken(token.getId());
+
+        // 3. Audit
+        audit(instance, "token.skipped_for_migration", skipElement.id(), token.getId(), userId,
+            Map.of("elementCode", skipElement.code(),
+                   "tasksCancelled", activeTasks.size(),
+                   "boundaryJobsCancelled", cancelledJobs));
+
+        // 4. Avanzar al outgoing del skipElement en targetDef.
+        //    Esto puede llegar a wait state inmediato (user_task → crear TaskInstance)
+        //    o cascadear hasta end_event (todo service_task/gateway).
+        consumeAndMoveToNext(instance, token, skipElement, targetDef, userId);
     }
 
     // ─── consume + move ─────────────────────────────────────────────────────
@@ -760,7 +811,7 @@ public class ProcessEngine {
         if (activityToken == null) {
             throw new IllegalStateException("Activity token not found for task " + taskInstanceId);
         }
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
         ProcessDefinition.FlowElement activity = def.findElementById(task.getFlowelementId());
         if (activity == null) throw new IllegalStateException("Activity element not found");
 
@@ -1286,7 +1337,7 @@ public class ProcessEngine {
         }
 
         ProcessDefinition parentDef = loader.load(parent.getProcessversionId(),
-            null, parent.getTenantId());
+            null, TenantContextHolder.SYSTEM_TENANT_ID);
         ProcessDefinition.FlowElement subProcessElement =
             parentDef.findElementById(parentToken.getCurrentElementId());
         if (subProcessElement == null) {
@@ -1549,7 +1600,7 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
         ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
         if (current == null) {
             log.error("advanceFromCorrelation: current element gone for token {}", token.getId());
@@ -1702,7 +1753,7 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
         ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
         if (current == null) return;
         audit(instance, "timer.fired", current.id(), token.getId(), null, Map.of(
@@ -1810,7 +1861,7 @@ public class ProcessEngine {
         metricInc("bpm.boundary.fired", instance.getProcessdefId().toString());
 
         // 3. Crear nuevo token en outgoing del boundary y avanzar
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
         List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(boundaryElementId);
         if (outgoing.isEmpty()) {
             log.warn("boundary_event '{}' has no outgoing flow — instance may stall", boundaryCode);
