@@ -374,12 +374,15 @@ public class BpmProcessController {
             @PathVariable("processversionId") String processversionIdStr,
             HttpServletRequest req) {
         UUID processVersionId = UUID.fromString(processversionIdStr);
-        UUID tenantId = TenantContextHolder.get();
+        // ProcessVersions viven SIEMPRE en SYSTEM tenant (catálogo cross-tenant).
+        // Si pasamos el user's tenant, el loader hace s2s con X-Tenant-Id=userTenant
+        // y SYSTEM TenantContextFilter rechaza al BPM service user (no es member
+        // de tenants operativos). Bug observado en cache MISS de v2 fresca.
         String bearerToken = extractBearer(req);
 
         ProcessDefinition def;
         try {
-            def = loader.load(processVersionId, bearerToken, tenantId);
+            def = loader.load(processVersionId, bearerToken, TenantContextHolder.SYSTEM_TENANT_ID);
         } catch (Exception e) {
             return ResponseEntity.notFound().build();
         }
