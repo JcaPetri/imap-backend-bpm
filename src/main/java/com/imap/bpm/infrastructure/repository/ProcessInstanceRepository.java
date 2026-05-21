@@ -13,4 +13,7 @@ public interface ProcessInstanceRepository extends JpaRepository<ProcessInstance
 
     /** Para listado admin (cleanup script). */
     List<ProcessInstance> findByProcessdefIdOrderByStartedAtDesc(UUID processdefId);
+
+    /** Hito 3 — migration: instances vivas en una processversion source. */
+    List<ProcessInstance> findByProcessversionIdAndLifecycle(UUID processversionId, String lifecycle);
 }
