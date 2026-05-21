@@ -128,14 +128,14 @@ public class MigrationApplyService {
         }
 
         // 3. Fetch target def (para resolver target codes → flowElementIds)
-        ProcessDefinition targetDef = defLoader.load(targetPvId, null, TenantContextHolder.get());
+        ProcessDefinition targetDef = defLoader.load(targetPvId, null, TenantContextHolder.SYSTEM_TENANT_ID);
         Map<String, UUID> targetCodeToId = new HashMap<>();
         for (ProcessDefinition.FlowElement fe : targetDef.flowElements()) {
             targetCodeToId.put(fe.code(), fe.id());
         }
 
         // 4. Fetch source def (para resolver currentElementId → code, para matchear con rules)
-        ProcessDefinition sourceDef = defLoader.load(sourcePvId, null, TenantContextHolder.get());
+        ProcessDefinition sourceDef = defLoader.load(sourcePvId, null, TenantContextHolder.SYSTEM_TENANT_ID);
         Map<UUID, String> sourceIdToCode = new HashMap<>();
         for (ProcessDefinition.FlowElement fe : sourceDef.flowElements()) {
             sourceIdToCode.put(fe.id(), fe.code());
@@ -263,7 +263,7 @@ public class MigrationApplyService {
             .uri("/v1/admin/bpm/migration-plans/{id}", planId.toString())
             .headers(h -> {
                 if (svcToken != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + svcToken);
-                h.set("X-Tenant-Id", TenantContextHolder.get().toString());
+                h.set("X-Tenant-Id", TenantContextHolder.SYSTEM_TENANT_ID.toString());
             })
             .retrieve()
             .bodyToMono(Map.class)
@@ -286,7 +286,7 @@ public class MigrationApplyService {
             .uri("/v1/admin/bpm/migration-plans/{id}/apply-status", planId.toString())
             .headers(h -> {
                 if (svcToken != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + svcToken);
-                h.set("X-Tenant-Id", TenantContextHolder.get().toString());
+                h.set("X-Tenant-Id", TenantContextHolder.SYSTEM_TENANT_ID.toString());
                 h.setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
             })
             .bodyValue(body)
