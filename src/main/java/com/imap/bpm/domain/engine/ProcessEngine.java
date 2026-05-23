@@ -84,6 +84,7 @@ public class ProcessEngine {
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
     private final com.imap.bpm.infrastructure.sse.SseEventBus sseBus;
+    private final com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
 
     public ProcessEngine(ProcessDefinitionLoader loader,
                          ProcessInstanceRepository instanceRepo,
@@ -98,7 +99,8 @@ public class ProcessEngine {
                          DmnEvaluator dmnEvaluator,
                          MeterRegistry meterRegistry,
                          ObjectMapper jackson,
-                         com.imap.bpm.infrastructure.sse.SseEventBus sseBus) {
+                         com.imap.bpm.infrastructure.sse.SseEventBus sseBus,
+                         com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -113,6 +115,7 @@ public class ProcessEngine {
         this.meterRegistry = meterRegistry;
         this.jackson = jackson;
         this.sseBus = sseBus;
+        this.serviceTaskRunner = serviceTaskRunner;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -311,11 +314,7 @@ public class ProcessEngine {
                 break;
 
             case "service_task":
-                // MVP: log + avanza. En iter siguiente: invoca handler real (Kafka/HTTP).
-                log.info("service_task '{}' invoked — MVP just logs and advances", current.code());
-                audit(instance, "service_task.invoked", current.id(), token.getId(), userId,
-                    Map.of("elementCode", current.code()));
-                consumeAndMoveToNext(instance, token, current, def, userId);
+                handleServiceTask(instance, token, current, def, userId);
                 break;
 
             case "exclusive_gateway":
@@ -436,6 +435,113 @@ public class ProcessEngine {
 
         // Recursión hasta wait state
         advanceToken(instance, token, def, userId);
+    }
+
+    // ─── service_task (Fase 0.B.1 — ServiceTaskRegistry) ───────────────────
+
+    /**
+     * Dispatcha el service_task al handler correspondiente vía {@link com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner}.
+     *
+     * Lookup chain en el Registry:
+     *   1. Local handler (@ServiceTask annotation en el classpath del BPM)
+     *   2. Remote handler (POST a baseUrl según prefix → bpm.service-tasks.remotes.<prefix>)
+     *   3. Fallback: log warning + advance (compat con V1 MVP donde todos eran log+advance)
+     *
+     * Resultado:
+     *   - SUCCESS → mergea resultVariables al instance + advance al outgoing
+     *   - FAILURE con boundaryErrorCode → dispara el boundary error event correspondiente
+     *   - FAILURE sin boundaryErrorCode (tras retries) → token a lifecycle='failed' + audit
+     *   - PENDING (V2) → no implementado, equivale a SUCCESS por ahora
+     */
+    private void handleServiceTask(ProcessInstance instance, Token token,
+                                    ProcessDefinition.FlowElement current,
+                                    ProcessDefinition def, UUID userId) {
+        String serviceCode = current.config() == null ? null : (String) current.config().get("serviceCode");
+        Map<String, Object> vars = currentVariablesAsMap(instance);
+
+        // Bearer token para que remote handlers puedan hacer s2s en cascade
+        String bearerToken = com.imap.bpm.infrastructure.security.BearerTokenHolder.get();
+
+        com.imap.bpm.domain.engine.servicetask.ServiceTaskContext ctx =
+            new com.imap.bpm.domain.engine.servicetask.ServiceTaskContext(
+                serviceCode, current, instance, token, userId, bearerToken, vars);
+
+        audit(instance, "service_task.invoked", current.id(), token.getId(), userId,
+            Map.of("elementCode", current.code(), "serviceCode", serviceCode == null ? "(none)" : serviceCode));
+
+        com.imap.bpm.domain.engine.servicetask.ServiceTaskResult result;
+        try {
+            result = serviceTaskRunner.runWithRetry(ctx);
+        } catch (Exception e) {
+            log.error("ServiceTaskRunner threw unexpected exception for serviceCode='{}'", serviceCode, e);
+            result = com.imap.bpm.domain.engine.servicetask.ServiceTaskResult.fail(
+                "RUNNER_EXCEPTION", e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+
+        // ── SUCCESS o PENDING (PENDING en MVP se trata como SUCCESS) ──────────
+        if (result.isSuccess() || result.isPending()) {
+            // Mergear resultVariables al processinstance.variables
+            if (result.resultVariables() != null && !result.resultVariables().isEmpty()) {
+                for (Map.Entry<String, Object> e : result.resultVariables().entrySet()) {
+                    setVariable(instance, e.getKey(), e.getValue());
+                }
+            }
+            audit(instance, "service_task.completed", current.id(), token.getId(), userId,
+                Map.of("elementCode", current.code(),
+                       "serviceCode", serviceCode == null ? "(none)" : serviceCode,
+                       "resultVarsCount", result.resultVariables() == null ? 0 : result.resultVariables().size()));
+            consumeAndMoveToNext(instance, token, current, def, userId);
+            return;
+        }
+
+        // ── FAILURE con boundaryErrorCode → disparar boundary error ───────────
+        if (result.boundaryErrorCode() != null) {
+            log.info("service_task '{}' raised boundaryErrorCode='{}' — looking for boundary error event",
+                current.code(), result.boundaryErrorCode());
+            audit(instance, "service_task.boundary_error", current.id(), token.getId(), userId,
+                Map.of("elementCode", current.code(),
+                       "boundaryErrorCode", result.boundaryErrorCode(),
+                       "errorMessage", result.errorMessage() == null ? "" : result.errorMessage()));
+            // Buscar boundary event adjunto al service_task con matching errorCode
+            // y disparar (mismo patrón que B2 — boundary timer fire).
+            // MVP simple: si no hay boundary, marcar como failure normal.
+            boolean fired = tryFireServiceTaskBoundaryError(instance, token, current, def,
+                result.boundaryErrorCode(), userId);
+            if (fired) return;
+            // Fall through: no boundary → tratar como FAILURE normal
+        }
+
+        // ── FAILURE definitivo (sin boundary o sin boundary matching) ─────────
+        token.setLifecycle("failed");
+        token.setUpdatedAt(OffsetDateTime.now());
+        tokenRepo.save(token);
+        audit(instance, "service_task.failed", current.id(), token.getId(), userId,
+            Map.of("elementCode", current.code(),
+                   "serviceCode", serviceCode == null ? "(none)" : serviceCode,
+                   "errorCode", result.errorCode() == null ? "UNKNOWN" : result.errorCode(),
+                   "errorMessage", result.errorMessage() == null ? "" : result.errorMessage()));
+        log.error("service_task '{}' (serviceCode={}) failed after retries — token {} marked as failed",
+            current.code(), serviceCode, token.getId());
+    }
+
+    /**
+     * Stub MVP: en V1 NO buscamos boundary error events para service_tasks
+     * (los boundaries solo están implementados sobre user_task — ver
+     * scheduleBoundaryTimers). Para soportarlo en service_task necesitamos
+     * una iter dedicada. Por ahora retorna false → fall through a failure.
+     *
+     * V2 TODO: implementar igual que B2 (handleUserTask) — leer
+     * def.findBoundariesFor(current.code()), filtrar por subtype='error' +
+     * config.errorCode matching, disparar el primero.
+     */
+    private boolean tryFireServiceTaskBoundaryError(ProcessInstance instance, Token token,
+                                                     ProcessDefinition.FlowElement serviceTask,
+                                                     ProcessDefinition def,
+                                                     String errorCode, UUID userId) {
+        log.warn("Service task boundary error handling is V2 (not implemented yet) — " +
+                 "errorCode='{}' on service_task '{}' will fall through to FAILURE",
+                 errorCode, serviceTask.code());
+        return false;
     }
 
     // ─── end_event ──────────────────────────────────────────────────────────
