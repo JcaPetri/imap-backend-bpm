@@ -85,6 +85,7 @@ public class ProcessEngine {
     private final JexlEngine jexl;
     private final com.imap.bpm.infrastructure.sse.SseEventBus sseBus;
     private final com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
+    private final com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo;
 
     public ProcessEngine(ProcessDefinitionLoader loader,
                          ProcessInstanceRepository instanceRepo,
@@ -100,7 +101,8 @@ public class ProcessEngine {
                          MeterRegistry meterRegistry,
                          ObjectMapper jackson,
                          com.imap.bpm.infrastructure.sse.SseEventBus sseBus,
-                         com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner) {
+                         com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner,
+                         com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -116,6 +118,7 @@ public class ProcessEngine {
         this.jackson = jackson;
         this.sseBus = sseBus;
         this.serviceTaskRunner = serviceTaskRunner;
+        this.msgStartSubRepo = msgStartSubRepo;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -155,6 +158,67 @@ public class ProcessEngine {
         tenantSession.applyToCurrentTransaction();
         return startProcessInternal(processVersionId, payload, bearerToken, tenantId, userId,
             null, null);
+    }
+
+    /**
+     * Fase 3 Día 4: Arranca instances por message correlation (event-based start).
+     *
+     * Busca todas las subscriptions activas matching (tenantId, messageCode) en
+     * bpm_pro_message_start_subscription_tbl y arranca un instance por cada match.
+     * Permite broadcast: N processdefs distintos suscritos al mismo messageCode
+     * disparan en paralelo.
+     *
+     * Si no hay subscriptions → devuelve lista vacía (NO error). Esto permite que
+     * el caller (típicamente un microservicio externo emitiendo events) no se
+     * acople a si hay processes suscritos o no.
+     *
+     * @param messageCode    El código del message (ej. "inventory.purchase_order.arriving")
+     * @param payload        Variables iniciales que se mergean al processinstance
+     * @param bearerToken    JWT del caller para propagar a s2s (puede ser null en service calls)
+     * @param tenantId       Tenant_id del caller
+     * @param userId         UUID del user que dispara (puede ser null para events sin user)
+     * @return Lista de ProcessInstance creadas (puede estar vacía si no hay subscriptions)
+     */
+    public List<ProcessInstance> startProcessByMessage(String messageCode,
+                                                       Map<String, Object> payload,
+                                                       String bearerToken,
+                                                       UUID tenantId,
+                                                       UUID userId) {
+        if (messageCode == null || messageCode.isBlank()) {
+            log.warn("startProcessByMessage called with null/blank messageCode — skipping");
+            return Collections.emptyList();
+        }
+        if (tenantId == null) tenantId = TenantContextHolder.get();
+
+        List<com.imap.bpm.infrastructure.entity.MessageStartSubscription> subs =
+            msgStartSubRepo.findActiveByTenantAndMessageCode(tenantId, messageCode);
+
+        if (subs.isEmpty()) {
+            log.info("No active message-start subscriptions for tenant {} message '{}' — no instances started",
+                tenantId, messageCode);
+            return Collections.emptyList();
+        }
+
+        log.info("Found {} active message-start subscriptions for tenant {} message '{}'",
+            subs.size(), tenantId, messageCode);
+
+        List<ProcessInstance> instances = new ArrayList<>(subs.size());
+        for (com.imap.bpm.infrastructure.entity.MessageStartSubscription sub : subs) {
+            try {
+                // Each call is its own transaction (via @Transactional on startProcess)
+                ProcessInstance inst = startProcess(
+                    sub.getProcessversionId(), payload, bearerToken, tenantId, userId);
+                instances.add(inst);
+                metricInc("bpm.instance.started_by_message", sub.getMessageCode());
+                log.info("Started instance {} from message '{}' subscription {} (processVersion {})",
+                    inst.getId(), messageCode, sub.getId(), sub.getProcessversionId());
+            } catch (Exception e) {
+                log.error("Failed to start instance from message '{}' subscription {} (processVersion {}): {}",
+                    messageCode, sub.getId(), sub.getProcessversionId(), e.getMessage(), e);
+                // Continue with other subscriptions — best-effort broadcast
+            }
+        }
+        return instances;
     }
 
     /**

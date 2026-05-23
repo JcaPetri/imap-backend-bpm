@@ -110,6 +110,57 @@ public class BpmProcessController {
         return toInstanceResponse(instance);
     }
 
+    /**
+     * Fase 3 Día 4 — endpoint de message-start.
+     *
+     * Body:
+     *   { "messageCode": "inventory.purchase_order.arriving",
+     *     "variables":   { "productId": "...", "expectedQty": 100, ... } }
+     *
+     * El motor busca subscriptions activas matching (tenantId del header X-Tenant-Id,
+     * messageCode del body) en bpm_pro_message_start_subscription_tbl, y arranca un
+     * ProcessInstance por cada match. Permite broadcast.
+     *
+     * Respuesta:
+     *   { "messageCode": "...",
+     *     "instancesStarted": 2,
+     *     "instances": [ {id, processdefCode, lifecycle, ...}, ... ] }
+     *
+     * Si no hay subscriptions matching, devuelve instancesStarted=0 y lista vacía.
+     * Esto NO es error — permite que el caller (microservicio externo emitiendo
+     * events) no se acople a si hay processes suscritos.
+     */
+    @PostMapping("/messages/start")
+    public Map<String, Object> startByMessage(@RequestBody Map<String, Object> body,
+                                              HttpServletRequest req) {
+        if (body == null || body.get("messageCode") == null) {
+            throw new IllegalArgumentException("body.messageCode is required");
+        }
+        String messageCode = body.get("messageCode").toString();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> variables = body.get("variables") instanceof Map
+            ? (Map<String, Object>) body.get("variables")
+            : Map.of();
+
+        UUID tenantId = TenantContextHolder.get();
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        String bearerToken = extractBearer(req);
+
+        java.util.List<ProcessInstance> instances = engine.startProcessByMessage(
+            messageCode, variables, bearerToken, tenantId, userId);
+
+        java.util.List<Map<String, Object>> instResponses = new java.util.ArrayList<>(instances.size());
+        for (ProcessInstance inst : instances) {
+            instResponses.add(toInstanceResponse(inst));
+        }
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("messageCode", messageCode);
+        out.put("instancesStarted", instances.size());
+        out.put("instances", instResponses);
+        return out;
+    }
+
     @PostMapping("/task/{taskInstanceId}/complete")
     public Map<String, Object> completeTask(@PathVariable("taskInstanceId") String taskInstanceId,
                                             @RequestBody(required = false) Map<String, Object> outputData,

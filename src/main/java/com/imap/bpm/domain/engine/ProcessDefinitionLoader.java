@@ -3,16 +3,21 @@ package com.imap.bpm.domain.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.imap.bpm.infrastructure.entity.MessageStartSubscription;
+import com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository;
 import com.imap.bpm.infrastructure.security.BearerTokenHolder;
 import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
+import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
+import java.time.OffsetDateTime;
 import java.util.*;
 
 /**
@@ -39,18 +44,24 @@ public class ProcessDefinitionLoader {
 
     private static final Logger log = LoggerFactory.getLogger(ProcessDefinitionLoader.class);
 
+    private static final UUID DEFAULT_STATE_ACTIVE =
+        UUID.fromString("019dc6f0-aa83-7333-8888-000000000001");
+
     private final WebClient http;
     private final ObjectMapper jackson;
     private final Cache<UUID, ProcessDefinition> cache;
     private final BpmServiceTokenProvider serviceTokenProvider;
+    private final MessageStartSubscriptionRepository msgStartSubRepo;
 
     public ProcessDefinitionLoader(@Value("${imap.system.base-url:http://localhost:8092/imap/system}")
                                    String systemBaseUrl,
                                    ObjectMapper jackson,
-                                   BpmServiceTokenProvider serviceTokenProvider) {
+                                   BpmServiceTokenProvider serviceTokenProvider,
+                                   MessageStartSubscriptionRepository msgStartSubRepo) {
         this.http = WebClient.builder().baseUrl(systemBaseUrl).build();
         this.jackson = jackson;
         this.serviceTokenProvider = serviceTokenProvider;
+        this.msgStartSubRepo = msgStartSubRepo;
         this.cache = Caffeine.newBuilder()
             .maximumSize(200)
             .expireAfterWrite(Duration.ofDays(365))   // efectivamente infinito
@@ -95,6 +106,17 @@ public class ProcessDefinitionLoader {
         cache.put(processVersionId, def);
         log.info("Cached processVersion {} ({} flowElements, {} sequenceFlows, {} taskForms)",
             processVersionId, def.flowElements().size(), def.sequenceFlows().size(), def.taskForms().size());
+
+        // Fase 3 Día 4: populate message_start_subscription si hay startEvents con messageCode
+        try {
+            syncMessageStartSubscriptions(def, tenantId);
+        } catch (Exception e) {
+            // No queremos fallar el load si la sincro de subscriptions falla
+            // (la subscription es opcional — el processdef sigue arrancable por versionId-start).
+            log.warn("syncMessageStartSubscriptions failed for processVersion {}: {}",
+                processVersionId, e.getMessage());
+        }
+
         return def;
     }
 
@@ -169,6 +191,76 @@ public class ProcessDefinitionLoader {
             log.warn("Could not parse JSON config: {}", json);
             return Map.of();
         }
+    }
+
+    /**
+     * Fase 3 Día 4: para cada startEvent del processdef con config.message.messageCode,
+     * UPSERT una subscription en bpm_pro_message_start_subscription_tbl y desactiva
+     * las viejas del mismo (tenant, message_code, processdef_id) (V1: solo current
+     * version dispara por message-start).
+     *
+     * Si tenantId es null → skip (load anonymous probablemente, no tiene contexto
+     * tenant para asociar la subscription).
+     */
+    @Transactional
+    protected void syncMessageStartSubscriptions(ProcessDefinition def, UUID tenantId) {
+        if (tenantId == null) tenantId = TenantContextHolder.get();
+        if (tenantId == null || def.processdefId() == null) return;
+
+        for (ProcessDefinition.FlowElement fe : def.flowElements()) {
+            if (!"start_event".equals(fe.type())) continue;
+
+            String messageCode = extractMessageCode(fe.config());
+            if (messageCode == null) continue;
+
+            // 1. UPSERT: si ya existe la subscription para esta version+startEvent, marcarla active.
+            //    Si no existe, crearla.
+            Optional<MessageStartSubscription> existing = msgStartSubRepo.findForUpsert(
+                tenantId, messageCode, def.processVersionId(), fe.id());
+            MessageStartSubscription sub = existing.orElseGet(() -> {
+                MessageStartSubscription s = new MessageStartSubscription();
+                s.setId(UUID.randomUUID());
+                s.setTenantId(TenantContextHolder.get());
+                s.setMessageCode(messageCode);
+                s.setProcessdefId(def.processdefId());
+                s.setProcessversionId(def.processVersionId());
+                s.setStartFlowElementId(fe.id());
+                s.setStateId(DEFAULT_STATE_ACTIVE);
+                s.setCreatedAt(OffsetDateTime.now());
+                return s;
+            });
+            sub.setActive(true);
+            sub.setUpdatedAt(OffsetDateTime.now());
+            msgStartSubRepo.save(sub);
+
+            // 2. Deactivate older subscriptions of same (tenant, messageCode, processdefId)
+            //    pero con una processversionId distinta.
+            int deactivated = msgStartSubRepo.deactivateOldVersions(
+                tenantId, messageCode, def.processdefId(), def.processVersionId());
+            if (deactivated > 0) {
+                log.info("Deactivated {} older message-start subscriptions for processdef {} message '{}'",
+                    deactivated, def.processdefCode(), messageCode);
+            }
+
+            log.info("Synced message-start subscription: tenant {} message '{}' → processVersion {} (startEvent {})",
+                tenantId, messageCode, def.processVersionId(), fe.id());
+        }
+    }
+
+    /**
+     * Extrae el message code de un config flowElement.
+     * Soporta: config.message.messageCode (anidado) y config.messageCode (flat).
+     */
+    @SuppressWarnings("unchecked")
+    private String extractMessageCode(Map<String, Object> config) {
+        if (config == null || config.isEmpty()) return null;
+        Object messageObj = config.get("message");
+        if (messageObj instanceof Map) {
+            Object code = ((Map<String, Object>) messageObj).get("messageCode");
+            if (code != null) return code.toString();
+        }
+        Object flat = config.get("messageCode");
+        return flat == null ? null : flat.toString();
     }
 
     private int intVal(Object o, int dflt) {
