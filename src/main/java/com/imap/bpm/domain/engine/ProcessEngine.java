@@ -87,6 +87,18 @@ public class ProcessEngine {
     private final com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
     private final com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo;
 
+    /**
+     * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
+     * de esta MISMA clase y que el proxy de Spring aplique correctamente.
+     * Spring NO intercepta self-invocations directas (this.method()) porque va
+     * por el bean directo, no por el CGLIB proxy. Inyectando this como bean
+     * separado, this.self.method() SÍ atraviesa el proxy y la @Transactional
+     * (incl. MANDATORY propagation) funciona.
+     */
+    @org.springframework.context.annotation.Lazy
+    @org.springframework.beans.factory.annotation.Autowired
+    private ProcessEngine self;
+
     public ProcessEngine(ProcessDefinitionLoader loader,
                          ProcessInstanceRepository instanceRepo,
                          TokenRepository tokenRepo,
@@ -205,8 +217,11 @@ public class ProcessEngine {
         List<ProcessInstance> instances = new ArrayList<>(subs.size());
         for (com.imap.bpm.infrastructure.entity.MessageStartSubscription sub : subs) {
             try {
-                // Each call is its own transaction (via @Transactional on startProcess)
-                ProcessInstance inst = startProcess(
+                // Each call is its own transaction (via @Transactional on startProcess).
+                // self.startProcess para que el proxy de Spring aplique la @Transactional
+                // (sin self, la self-invocation no atraviesa el CGLIB proxy y la tx no abre,
+                // rompiendo el applyToCurrentTransaction MANDATORY de tenantSession).
+                ProcessInstance inst = self.startProcess(
                     sub.getProcessversionId(), payload, bearerToken, tenantId, userId);
                 instances.add(inst);
                 metricInc("bpm.instance.started_by_message", sub.getMessageCode());
