@@ -86,6 +86,7 @@ public class ProcessEngine {
     private final com.imap.bpm.infrastructure.sse.SseEventBus sseBus;
     private final com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
     private final com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo;
+    private final com.imap.bpm.domain.service.TaskAssignmentService taskAssignmentService;
 
     /**
      * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
@@ -114,7 +115,8 @@ public class ProcessEngine {
                          ObjectMapper jackson,
                          com.imap.bpm.infrastructure.sse.SseEventBus sseBus,
                          com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner,
-                         com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo) {
+                         com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo,
+                         com.imap.bpm.domain.service.TaskAssignmentService taskAssignmentService) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -131,6 +133,7 @@ public class ProcessEngine {
         this.sseBus = sseBus;
         this.serviceTaskRunner = serviceTaskRunner;
         this.msgStartSubRepo = msgStartSubRepo;
+        this.taskAssignmentService = taskAssignmentService;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -690,10 +693,14 @@ public class ProcessEngine {
         task.setLifecycle("created");
         task.setPriority(50);
         task.setInputData(inputData);
-        // A3 — AssignmentRule MVP: assignedUser default = quien arrancó el
-        // proceso. Cuando llegue Iter 5 AssignmentRule, acá se consulta
+        // A3 — AssignmentRule via TaskAssignmentService (tech-debt sprint D2 P1):
+        // V1 hardcoded — si starter es service account → fallback admin.
+        // Cuando llegue Iter 5 AssignmentRule real, acá se consulta
         // bpm_hum_assignmentrule del flowelement (user / role / group / expr).
-        task.setAssignedUserId(instance.getStartedById());
+        UUID assignee = taskAssignmentService.resolveAssignee(
+            def.processdefCode(), userTask.code(),
+            instance.getStartedById(), instance.getTenantId());
+        task.setAssignedUserId(assignee);
         task.setAssignedAt(now);
         task.setStateId(DEFAULT_STATE_ACTIVE);
         task.setCreatedAt(now);
