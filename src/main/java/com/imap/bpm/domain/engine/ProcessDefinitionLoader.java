@@ -52,16 +52,29 @@ public class ProcessDefinitionLoader {
     private final Cache<UUID, ProcessDefinition> cache;
     private final BpmServiceTokenProvider serviceTokenProvider;
     private final MessageStartSubscriptionRepository msgStartSubRepo;
+    private final com.imap.eav.engine.context.EavTenantSession tenantSession;
+
+    /**
+     * Self-injection (lazy) para invocar syncMessageStartSubscriptions desde load()
+     * de manera que el proxy de Spring aplique correctamente la @Transactional
+     * (sin self, la self-invocation directa no abre tx y el tenantSession MANDATORY
+     * falla + RLS deja el query EAV con 0 rows).
+     */
+    @org.springframework.context.annotation.Lazy
+    @org.springframework.beans.factory.annotation.Autowired
+    private ProcessDefinitionLoader self;
 
     public ProcessDefinitionLoader(@Value("${imap.system.base-url:http://localhost:8092/imap/system}")
                                    String systemBaseUrl,
                                    ObjectMapper jackson,
                                    BpmServiceTokenProvider serviceTokenProvider,
-                                   MessageStartSubscriptionRepository msgStartSubRepo) {
+                                   MessageStartSubscriptionRepository msgStartSubRepo,
+                                   com.imap.eav.engine.context.EavTenantSession tenantSession) {
         this.http = WebClient.builder().baseUrl(systemBaseUrl).build();
         this.jackson = jackson;
         this.serviceTokenProvider = serviceTokenProvider;
         this.msgStartSubRepo = msgStartSubRepo;
+        this.tenantSession = tenantSession;
         this.cache = Caffeine.newBuilder()
             .maximumSize(200)
             .expireAfterWrite(Duration.ofDays(365))   // efectivamente infinito
@@ -107,9 +120,11 @@ public class ProcessDefinitionLoader {
         log.info("Cached processVersion {} ({} flowElements, {} sequenceFlows, {} taskForms)",
             processVersionId, def.flowElements().size(), def.sequenceFlows().size(), def.taskForms().size());
 
-        // Fase 3 Día 4: populate message_start_subscription si hay startEvents con messageCode
+        // Fase 3 Día 4: populate message_start_subscription si hay startEvents con messageCode.
+        // self.* para que el proxy de Spring aplique @Transactional + tenantSession (sin
+        // proxy la self-invocation directa no abre tx).
         try {
-            syncMessageStartSubscriptions(def, tenantId);
+            self.syncMessageStartSubscriptions(def, tenantId);
         } catch (Exception e) {
             // No queremos fallar el load si la sincro de subscriptions falla
             // (la subscription es opcional — el processdef sigue arrancable por versionId-start).
@@ -203,9 +218,13 @@ public class ProcessDefinitionLoader {
      * tenant para asociar la subscription).
      */
     @Transactional
-    protected void syncMessageStartSubscriptions(ProcessDefinition def, UUID tenantId) {
+    public void syncMessageStartSubscriptions(ProcessDefinition def, UUID tenantId) {
         if (tenantId == null) tenantId = TenantContextHolder.get();
         if (tenantId == null || def.processdefId() == null) return;
+
+        // RLS: tabla bpm_pro_message_start_subscription_tbl tiene RLS habilitada
+        // (Fase 4 Día 0). Sin aplicar tenantSession los queries devuelven 0 rows.
+        tenantSession.applyToCurrentTransaction();
 
         for (ProcessDefinition.FlowElement fe : def.flowElements()) {
             if (!"start_event".equals(fe.type())) continue;

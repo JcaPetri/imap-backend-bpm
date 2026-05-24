@@ -306,6 +306,7 @@ public class BpmProcessController {
         ProcessDefinition def = safeLoad(pi.getProcessversionId(), bearerToken, tenantId);
         List<TaskInstance> tasks = taskRepo.findByProcessinstanceId(id);
         List<AuditLog> audits = auditRepo.findByProcessinstanceIdOrderByOccurredAtDesc(id);
+        List<com.imap.bpm.infrastructure.entity.Variable> vars = varRepo.findByProcessinstanceId(id);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", pi.getId().toString());
@@ -321,6 +322,15 @@ public class BpmProcessController {
             out.put("processdefCode", def.processdefCode());
             out.put("processdefName", def.processdefName());
         }
+
+        // Fase 4 Día 0 (D4): variables del processinstance mergeadas por los handlers.
+        // Útil para el frontend que necesita el contexto del flow (ej. ruleApplied,
+        // targetLocationCode, moveId) sin pedir endpoint adicional.
+        Map<String, Object> varsMap = new LinkedHashMap<>();
+        for (com.imap.bpm.infrastructure.entity.Variable v : vars) {
+            varsMap.put(v.getVarName(), v.getVarValue());
+        }
+        out.put("variables", varsMap);
 
         // Tasks de la instance (orden cronológico ascendente)
         tasks.sort(Comparator.comparing(TaskInstance::getCreatedAt));

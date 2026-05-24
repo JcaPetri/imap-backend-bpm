@@ -191,6 +191,7 @@ public class ProcessEngine {
      * @param userId         UUID del user que dispara (puede ser null para events sin user)
      * @return Lista de ProcessInstance creadas (puede estar vacía si no hay subscriptions)
      */
+    @Transactional
     public List<ProcessInstance> startProcessByMessage(String messageCode,
                                                        Map<String, Object> payload,
                                                        String bearerToken,
@@ -201,6 +202,11 @@ public class ProcessEngine {
             return Collections.emptyList();
         }
         if (tenantId == null) tenantId = TenantContextHolder.get();
+
+        // RLS: tabla bpm_pro_message_start_subscription_tbl tiene RLS habilitada
+        // (Fase 4 Día 0 fix — se había deshabilitado por error en Fase 3 Día 4).
+        // Sin aplicar tenantSession, el query devuelve 0 rows aunque haya subscriptions.
+        tenantSession.applyToCurrentTransaction();
 
         List<com.imap.bpm.infrastructure.entity.MessageStartSubscription> subs =
             msgStartSubRepo.findActiveByTenantAndMessageCode(tenantId, messageCode);
