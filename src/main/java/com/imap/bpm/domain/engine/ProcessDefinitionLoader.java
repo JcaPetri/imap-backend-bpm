@@ -217,7 +217,14 @@ public class ProcessDefinitionLoader {
      * Si tenantId es null → skip (load anonymous probablemente, no tiene contexto
      * tenant para asociar la subscription).
      */
-    @Transactional
+    /**
+     * REQUIRES_NEW: abre tx nueva (no read-only) para los UPSERT/UPDATE de subscriptions.
+     * Necesario porque load() se invoca desde endpoints @Transactional(readOnly=true)
+     * como listMyTasks y getInstance — sin REQUIRES_NEW falla con
+     * "cannot execute UPDATE in a read-only transaction" + rollback de la tx outer.
+     */
+    @org.springframework.transaction.annotation.Transactional(
+        propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
     public void syncMessageStartSubscriptions(ProcessDefinition def, UUID tenantId) {
         if (tenantId == null) tenantId = TenantContextHolder.get();
         if (tenantId == null || def.processdefId() == null) return;
