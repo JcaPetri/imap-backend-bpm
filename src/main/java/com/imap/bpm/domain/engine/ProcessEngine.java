@@ -2105,10 +2105,33 @@ public class ProcessEngine {
             var.setStateId(DEFAULT_STATE_ACTIVE);
             var.setCreatedAt(now);
         }
-        var.setVarValue(value == null ? null : value.toString());
+        var.setVarValue(serializeVarValue(value));
         var.setVarType(inferVarType(value));
         var.setUpdatedAt(now);
         varRepo.save(var);
+    }
+
+    /**
+     * Serializa value para persistir en bpm_pro_variable_tbl.var_value (text).
+     * - Map/List → JSON real con Jackson (NO Java toString que produce {k=v})
+     * - Resto    → .toString() (string, number, boolean)
+     *
+     * Fix Fase 4 Día 4: handlers remotos que reciben Array/Map en variables
+     * estaban recibiendo Java toString() (no parseable como JSON). Ahora se
+     * persiste JSON real y los handlers pueden Jackson.readValue() directo.
+     */
+    private String serializeVarValue(Object value) {
+        if (value == null) return null;
+        if (value instanceof Map || value instanceof List) {
+            try {
+                return jackson.writeValueAsString(value);
+            } catch (Exception e) {
+                log.warn("setVariable: failed to JSON-serialize complex var, falling back to toString: {}",
+                    e.getMessage());
+                return value.toString();
+            }
+        }
+        return value.toString();
     }
 
     private String inferVarType(Object value) {
