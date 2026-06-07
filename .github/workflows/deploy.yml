@@ -37,9 +37,10 @@ jobs:
           server-password: GITHUB_TOKEN
 
       - name: Build jar (skip tests for now — UX gates en futuro Iter)
-        run: mvn -B package -DskipTests
+        run: mvn -B package -DskipTests -s .github/settings.xml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
 
       - name: Verify jar exists
         run: |
@@ -78,7 +79,7 @@ jobs:
             systemctl restart imap-bpm
 
             echo "[$(date)] Waiting for health 200 (max 30s)..."
-            for i in $(seq 1 15); do
+            for i in $(seq 1 60); do
               sleep 2
               STATUS=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8093/imap/bpm/actuator/health || echo "000")
               if [ "$STATUS" = "200" ]; then

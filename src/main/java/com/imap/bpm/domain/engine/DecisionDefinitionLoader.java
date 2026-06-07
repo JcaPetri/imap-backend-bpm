@@ -4,7 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.imap.bpm.infrastructure.security.BearerTokenHolder;
+import com.imap.platform.security.BearerTokenHolder;
 import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

@@ -1,4 +1,6 @@
 package com.imap.bpm.infrastructure.security;
+import com.imap.platform.security.UserContext;
+import com.imap.platform.security.UserContextHolder;
 
 import com.imap.eav.engine.context.UserContextProvider;
 import org.springframework.stereotype.Component;

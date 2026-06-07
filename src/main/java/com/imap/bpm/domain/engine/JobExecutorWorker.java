@@ -1,8 +1,8 @@
 package com.imap.bpm.domain.engine;
 
-import com.imap.bpm.infrastructure.security.BearerTokenHolder;
+import com.imap.platform.security.BearerTokenHolder;
 import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
-import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
+import com.imap.platform.tenant.TenantContextHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;

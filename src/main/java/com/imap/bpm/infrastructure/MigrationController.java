@@ -1,8 +1,8 @@
 package com.imap.bpm.infrastructure;
 
 import com.imap.bpm.domain.engine.MigrationApplyService;
-import com.imap.bpm.infrastructure.security.UserContext;
-import com.imap.bpm.infrastructure.security.UserContextHolder;
+import com.imap.platform.security.UserContext;
+import com.imap.platform.security.UserContextHolder;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;

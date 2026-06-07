@@ -22,6 +22,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * Puerto: 8093 | Context path: /imap/bpm | Schema postgres: bpm
  */
 @SpringBootApplication(scanBasePackages = {
+    "com.imap.platform",
     "com.imap.bpm",
     "com.imap.eav.engine"   // lib eav-engine: EavTenantSession (RLS bridge)
 })

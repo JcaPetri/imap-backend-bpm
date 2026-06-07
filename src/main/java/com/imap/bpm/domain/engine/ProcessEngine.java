@@ -3,7 +3,7 @@ package com.imap.bpm.domain.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.infrastructure.entity.*;
 import com.imap.bpm.infrastructure.repository.*;
-import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
+import com.imap.platform.tenant.TenantContextHolder;
 import com.imap.eav.engine.context.EavTenantSession;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Tags;
@@ -548,7 +548,7 @@ public class ProcessEngine {
         Map<String, Object> vars = currentVariablesAsMap(instance);
 
         // Bearer token para que remote handlers puedan hacer s2s en cascade
-        String bearerToken = com.imap.bpm.infrastructure.security.BearerTokenHolder.get();
+        String bearerToken = com.imap.platform.security.BearerTokenHolder.get();
 
         com.imap.bpm.domain.engine.servicetask.ServiceTaskContext ctx =
             new com.imap.bpm.domain.engine.servicetask.ServiceTaskContext(

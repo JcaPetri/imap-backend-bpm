@@ -143,6 +143,11 @@
              - json-schema-validator      (DMN inputs validation)
              - spring-kafka               (eventos cross-microservicio)
         -->
+        <dependency>
+            <groupId>com.imap</groupId>
+            <artifactId>imap-platform</artifactId>
+            <version>0.1.0-SNAPSHOT</version>
+        </dependency>
 
     </dependencies>
 
@@ -151,6 +156,12 @@
          Auth: ~/.m2/settings.xml o env GITHUB_ACTOR + GITHUB_TOKEN en CI.
          ==================================================================== -->
     <repositories>
+        <repository>
+            <id>github-platform</id>
+            <url>https://maven.pkg.github.com/JcaPetri/imap-backend-platform</url>
+            <releases><enabled>true</enabled></releases>
+            <snapshots><enabled>true</enabled></snapshots>
+        </repository>
         <repository>
             <id>github</id>
             <name>GitHub JcaPetri Apache Maven Packages</name>

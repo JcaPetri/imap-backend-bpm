@@ -1,4 +1,5 @@
 package com.imap.bpm.infrastructure.tenant;
+import com.imap.platform.tenant.TenantContextHolder;
 
 import com.imap.eav.engine.context.TenantContextProvider;
 import org.springframework.stereotype.Component;

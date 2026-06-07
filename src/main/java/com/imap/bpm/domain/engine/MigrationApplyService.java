@@ -9,7 +9,7 @@ import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.TokenRepository;
 import com.imap.bpm.infrastructure.security.BpmServiceTokenProvider;
 import com.imap.bpm.infrastructure.sse.SseEventBus;
-import com.imap.bpm.infrastructure.tenant.TenantContextHolder;
+import com.imap.platform.tenant.TenantContextHolder;
 import com.imap.eav.engine.context.EavTenantSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
