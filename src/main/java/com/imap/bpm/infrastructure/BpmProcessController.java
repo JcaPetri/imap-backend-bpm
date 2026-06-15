@@ -23,6 +23,8 @@ import com.imap.eav.engine.context.EavTenantSession;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -62,6 +64,8 @@ import java.util.*;
 @RestController
 @RequestMapping("/v1/bpm")
 public class BpmProcessController {
+
+    private static final Logger log = LoggerFactory.getLogger(BpmProcessController.class);
 
     private final ProcessEngine engine;
     private final TaskInstanceRepository taskRepo;
@@ -258,8 +262,21 @@ public class BpmProcessController {
         List<String> perms = permsByTenant == null ? List.of()
             : permsByTenant.getOrDefault(tenantId == null ? "" : tenantId.toString(), List.of());
 
+        // Degradación con gracia: si el catálogo de system no se puede leer
+        // (ej. el service token no está autorizado para /v1/admin/bpm/processdef →
+        // 403, fix de auth pendiente en el sprint de start_permission/permisos),
+        // devolvemos lista vacía en vez de 500 — la bandeja no debe romperse.
+        List<Map<String, Object>> defs;
+        try {
+            defs = loader.listProcessdefs(tenantId);
+        } catch (Exception e) {
+            log.warn("startable: no se pudo listar processdefs desde system ({}). Devuelvo []. "
+                + "Pendiente: autorizar el catálogo startable sin system.admin.", e.toString());
+            return List.of();
+        }
+
         List<Map<String, Object>> out = new ArrayList<>();
-        for (Map<String, Object> d : loader.listProcessdefs(tenantId)) {
+        for (Map<String, Object> d : defs) {
             if (!"active".equals(String.valueOf(d.get("lifecycle")))) continue;   // solo activos
             String code = d.get("code") == null ? null : d.get("code").toString();
             if (code == null) continue;
