@@ -153,7 +153,13 @@ public class ProcessDefinitionLoader {
      */
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> listProcessdefs(UUID tenantId) {
-        final String svcToken = serviceTokenProvider.currentToken();
+        // tokenForTenant (no currentToken): el catálogo de processdefs es tenant-scoped
+        // y el TenantContextFilter de system valida membership por X-Tenant-Id. El
+        // currentToken() solo tiene SYSTEM_TENANT → el service account no es "miembro"
+        // del tenant del user → 403. tokenForTenant mintea un token miembro del tenant.
+        final String svcToken = tenantId != null
+            ? serviceTokenProvider.tokenForTenant(tenantId)
+            : serviceTokenProvider.currentToken();
         final String effectiveBearer = svcToken != null ? svcToken : BearerTokenHolder.get();
         List<Map<String, Object>> resp = http.get()
             .uri("/v1/admin/bpm/processdef")
