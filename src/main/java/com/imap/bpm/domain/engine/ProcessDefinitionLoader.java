@@ -143,6 +143,30 @@ public class ProcessDefinitionLoader {
     /** Stats para debugging / metrics. */
     public long cacheSize() { return cache.estimatedSize(); }
 
+    /**
+     * WorkHub — catálogo de processdefs del tenant (para "startable processes").
+     * GET /v1/admin/bpm/processdef con SERVICE TOKEN (igual que load()). Cada
+     * entry: {processdefId, code, name, description, lifecycle, currentVersionId,
+     * [startPermission]}. `startPermission` es authoritative cuando system lo
+     * agregue como atributo EAV del processdef; hasta entonces el caller usa una
+     * convención. No se cachea (el catálogo cambia más que las versions).
+     */
+    @SuppressWarnings("unchecked")
+    public List<Map<String, Object>> listProcessdefs(UUID tenantId) {
+        final String svcToken = serviceTokenProvider.currentToken();
+        final String effectiveBearer = svcToken != null ? svcToken : BearerTokenHolder.get();
+        List<Map<String, Object>> resp = http.get()
+            .uri("/v1/admin/bpm/processdef")
+            .headers(h -> {
+                if (effectiveBearer != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + effectiveBearer);
+                if (tenantId != null)        h.set("X-Tenant-Id", tenantId.toString());
+            })
+            .retrieve()
+            .bodyToMono(List.class)
+            .block();
+        return resp == null ? List.of() : resp;
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")

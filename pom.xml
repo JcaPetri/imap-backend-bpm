@@ -69,6 +69,19 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- ===== Flyway — SQL migrations (estándar de los micros de dominio).
+             Migraciones en src/main/resources/db/migration (V001+). Prod existente
+             se adopta vía baseline-on-migrate (ver application.properties). ===== -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>10.6.0</version>
+        </dependency>
+
         <!-- JSONB support for Hibernate (para campos jsonb de las tablas bpm) -->
         <dependency>
             <groupId>io.hypersistence</groupId>

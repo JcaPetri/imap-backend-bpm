@@ -3,6 +3,9 @@ package com.imap.bpm.infrastructure;
 import com.imap.bpm.domain.engine.ProcessDefinition;
 import com.imap.bpm.domain.engine.ProcessDefinitionLoader;
 import com.imap.bpm.domain.engine.ProcessEngine;
+import com.imap.bpm.domain.workhub.ScoreService;
+import com.imap.bpm.domain.workhub.TaskPriority;
+import com.imap.bpm.infrastructure.sse.SseEventBus;
 import com.imap.bpm.infrastructure.entity.AuditLog;
 import com.imap.bpm.infrastructure.entity.ProcessInstance;
 import com.imap.bpm.infrastructure.entity.TaskInstance;
@@ -21,10 +24,13 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.*;
 
 /**
@@ -67,6 +73,8 @@ public class BpmProcessController {
     private final VariableRepository varRepo;
     private final JobExecutorRepository jobRepo;
     private final MessageCorrelationRepository msgCorrRepo;
+    private final ScoreService scoreService;
+    private final SseEventBus sseEventBus;
 
     @PersistenceContext
     private EntityManager em;
@@ -80,7 +88,9 @@ public class BpmProcessController {
                                 TokenRepository tokenRepo,
                                 VariableRepository varRepo,
                                 JobExecutorRepository jobRepo,
-                                MessageCorrelationRepository msgCorrRepo) {
+                                MessageCorrelationRepository msgCorrRepo,
+                                ScoreService scoreService,
+                                SseEventBus sseEventBus) {
         this.engine = engine;
         this.taskRepo = taskRepo;
         this.instanceRepo = instanceRepo;
@@ -91,6 +101,8 @@ public class BpmProcessController {
         this.varRepo = varRepo;
         this.jobRepo = jobRepo;
         this.msgCorrRepo = msgCorrRepo;
+        this.scoreService = scoreService;
+        this.sseEventBus = sseEventBus;
     }
 
     @PostMapping("/process/{versionId}/start")
@@ -178,6 +190,95 @@ public class BpmProcessController {
     }
 
     /**
+     * WorkHub — claim atómico de una tarea de cola (candidate group). CAS: solo
+     * tiene éxito si la tarea sigue libre (assignee NULL + lifecycle 'created').
+     * 409 si otro la tomó primero. Emite SSE `bpm.task.claimed` para invalidar la
+     * bandeja de los demás. Ver docs/architecture/workhub-northstar.md §3.
+     */
+    @PostMapping("/task/{taskInstanceId}/claim")
+    @Transactional
+    public ResponseEntity<?> claimTask(@PathVariable("taskInstanceId") String taskInstanceId) {
+        tenantSession.applyToCurrentTransaction();
+        UUID taskId = UUID.fromString(taskInstanceId);
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        if (userId == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(Map.of(
+                "error", "authentication_required",
+                "message", "Se requiere usuario autenticado para tomar una tarea."));
+        }
+
+        int updated = taskRepo.claimIfUnassigned(taskId, userId, OffsetDateTime.now(ZoneOffset.UTC));
+        if (updated == 0) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
+                "error", "already_claimed",
+                "message", "La tarea ya fue tomada por otro usuario o no está disponible.",
+                "taskId", taskInstanceId));
+        }
+
+        TaskInstance task = taskRepo.findById(taskId).orElse(null);
+        UUID instanceId = task != null ? task.getProcessinstanceId() : null;
+        sseEventBus.broadcast("bpm.task.claimed", Map.of(
+            "taskId", taskInstanceId,
+            "assignee", userId.toString(),
+            "processInstanceId", instanceId != null ? instanceId.toString() : ""));
+
+        return ResponseEntity.ok(task != null ? toTaskResponse(task)
+            : Map.of("taskId", taskInstanceId, "claimedBy", userId.toString()));
+    }
+
+    /** WorkHub — filtro de vistas por fecha de vencimiento (due_at). */
+    private static boolean matchesDateView(String view, OffsetDateTime dueAt, OffsetDateTime now) {
+        switch (view) {
+            case "overdue":  return dueAt != null && dueAt.isBefore(now);
+            case "today":    return dueAt != null && !dueAt.isBefore(now)
+                                    && dueAt.isBefore(now.plusHours(24));   // ~ hoy / próximas 24h
+            case "upcoming": return dueAt == null || !dueAt.isBefore(now.plusHours(24));
+            default:         return true;   // vista desconocida → no filtra
+        }
+    }
+
+    /**
+     * WorkHub — procesos que el usuario puede INICIAR (zona "Iniciar" de la
+     * bandeja). Lista el catálogo de processdefs (system) y filtra por el permiso
+     * requerido contra los permisos del JWT para el tenant actual. El permiso lo
+     * declara el processdef como metadata EAV (`startPermission`); si aún no está,
+     * se usa la convención `bpm.start.<code>`. El grant vive en IAM (JWT).
+     * Ver docs/architecture/workhub-northstar.md §6.
+     */
+    @GetMapping("/me/startable")
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> startableProcesses() {
+        tenantSession.applyToCurrentTransaction();
+        UUID tenantId = TenantContextHolder.get();
+        UserContext user = UserContextHolder.get();
+        if (user == null) return List.of();   // anonymous no puede iniciar nada
+
+        Map<String, List<String>> permsByTenant = user.permissionsByTenant();
+        List<String> perms = permsByTenant == null ? List.of()
+            : permsByTenant.getOrDefault(tenantId == null ? "" : tenantId.toString(), List.of());
+
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> d : loader.listProcessdefs(tenantId)) {
+            if (!"active".equals(String.valueOf(d.get("lifecycle")))) continue;   // solo activos
+            String code = d.get("code") == null ? null : d.get("code").toString();
+            if (code == null) continue;
+            Object explicitPerm = d.get("startPermission");   // authoritative si system lo provee
+            String requiredPerm = explicitPerm != null ? explicitPerm.toString() : "bpm.start." + code;
+            if (!perms.contains(requiredPerm)) continue;       // sin permiso → no startable
+
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("processdefId", d.get("processdefId"));
+            row.put("processKey", code);
+            row.put("label", d.get("name"));
+            row.put("currentVersionId", d.get("currentVersionId"));
+            row.put("permission", requiredPerm);
+            out.add(row);
+        }
+        return out;
+    }
+
+    /**
      * Lista tareas humanas vivas asignadas al usuario actual (A3 —
      * AssignmentRule MVP). El backend setea `assignedUserId = startedById`
      * cuando crea la task (ver ProcessEngine.handleUserTask). Iter 5+
@@ -189,7 +290,9 @@ public class BpmProcessController {
      */
     @GetMapping("/me/tasks")
     @Transactional(readOnly = true)
-    public List<Map<String, Object>> listMyTasks(HttpServletRequest req) {
+    public List<Map<String, Object>> listMyTasks(
+            @RequestParam(value = "view", required = false) String view,
+            HttpServletRequest req) {
         tenantSession.applyToCurrentTransaction();
         UUID tenantId = TenantContextHolder.get();
         UserContext user = UserContextHolder.get();
@@ -197,8 +300,15 @@ public class BpmProcessController {
         if (userId == null) return List.of();
         String bearerToken = extractBearer(req);
 
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         List<TaskInstance> tasks = taskRepo.findByAssignedUserIdAndLifecycleInOrderByCreatedAtDesc(
             userId, List.of("created", "reserved"));
+
+        // WorkHub — vistas de la bandeja por fecha (today/overdue/upcoming).
+        // Sin view (o "mine"/"all") devuelve todas. Ver workhub-northstar §1.1.
+        if (view != null && !view.isBlank() && !view.equals("mine") && !view.equals("all")) {
+            tasks = tasks.stream().filter(t -> matchesDateView(view, t.getDueAt(), now)).toList();
+        }
 
         // Cache local de definitions (mismo processversion → 1 load por request)
         Map<UUID, ProcessDefinition> defCache = new HashMap<>();
@@ -227,6 +337,14 @@ public class BpmProcessController {
                     row.put("flowElementName", fe.name());
                 }
             }
+
+            // WorkHub — prioridad% + semáforo (clasificación G/U/T del tenant + SLA).
+            TaskPriority prio = scoreService.compute(
+                tenantId, pi.getProcessdefId(), t.getFlowelementId(), t.getDueAt());
+            row.put("priorityPct", (int) Math.round(prio.prioridadPct()));
+            row.put("semaphore", prio.color().name());     // GREEN | YELLOW | RED
+            row.put("classified", prio.classified());
+
             out.add(row);
         }
         return out;

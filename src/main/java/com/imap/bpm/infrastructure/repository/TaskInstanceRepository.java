@@ -2,11 +2,29 @@ package com.imap.bpm.infrastructure.repository;
 
 import com.imap.bpm.infrastructure.entity.TaskInstance;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
 public interface TaskInstanceRepository extends JpaRepository<TaskInstance, UUID> {
+
+    /**
+     * WorkHub — claim atómico (compare-and-set). Asigna la tarea al usuario SOLO
+     * si sigue libre (assigned_user_id NULL y lifecycle 'created'). Devuelve el
+     * número de filas afectadas: 1 = claim exitoso, 0 = ya la tomó otro (→ 409).
+     * Sin lock pesimista. Ver docs/architecture/workhub-northstar.md §3.
+     */
+    @Modifying
+    @Query("UPDATE TaskInstance t SET t.assignedUserId = :userId, t.lifecycle = 'assigned', "
+         + "t.assignedAt = :now, t.updatedAt = :now "
+         + "WHERE t.id = :taskId AND t.assignedUserId IS NULL AND t.lifecycle = 'created'")
+    int claimIfUnassigned(@Param("taskId") UUID taskId,
+                          @Param("userId") UUID userId,
+                          @Param("now") OffsetDateTime now);
     List<TaskInstance> findByAssignedUserIdAndLifecycleIn(UUID assignedUserId, List<String> lifecycles);
     List<TaskInstance> findByProcessinstanceId(UUID processinstanceId);
 
