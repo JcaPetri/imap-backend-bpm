@@ -44,6 +44,15 @@ public interface TaskInstanceRepository extends JpaRepository<TaskInstance, UUID
     List<TaskInstance> findByTenantIdAndLifecycleInOrderByCreatedAtDesc(
         UUID tenantId, List<String> lifecycles);
 
+    /**
+     * WorkHub 3b — tareas DE COLA (pooled) visibles para el usuario: sin assignee,
+     * cuyo candidate group (assigned_role = permiso 'bpm.queue.X') está entre los
+     * permisos del JWT del user. Tenant-scoped explícito (RLS bpm inerte).
+     * Ver docs/architecture/workhub-northstar.md §6.2 (modelo A).
+     */
+    List<TaskInstance> findByTenantIdAndAssignedUserIdIsNullAndAssignedRoleInAndLifecycleInOrderByCreatedAtDesc(
+        UUID tenantId, List<String> assignedRoles, List<String> lifecycles);
+
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);
 

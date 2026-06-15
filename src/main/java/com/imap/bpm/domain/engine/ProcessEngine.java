@@ -697,11 +697,21 @@ public class ProcessEngine {
         // V1 hardcoded — si starter es service account → fallback admin.
         // Cuando llegue Iter 5 AssignmentRule real, acá se consulta
         // bpm_hum_assignmentrule del flowelement (user / role / group / expr).
-        UUID assignee = taskAssignmentService.resolveAssignee(
-            def.processdefCode(), userTask.code(),
-            instance.getStartedById(), instance.getTenantId());
-        task.setAssignedUserId(assignee);
-        task.setAssignedAt(now);
+        // WorkHub 3b.1 — routing: si el user_task define candidate group (config
+        // candidateGroup, estático o ${var}) → tarea DE COLA (assignee null, claimable
+        // por quien tenga el permiso bpm.queue.<x>). Si no → asignación directa (actual).
+        // 3b.2: el candidate group se resolverá por DMN en este mismo punto.
+        String candidateGroup = taskAssignmentService.resolveCandidateGroup(
+            userTask.config(), inputData);
+        if (candidateGroup != null) {
+            task.setAssignedRole(candidateGroup);   // assignee + assigned_at quedan null hasta el claim
+        } else {
+            UUID assignee = taskAssignmentService.resolveAssignee(
+                def.processdefCode(), userTask.code(),
+                instance.getStartedById(), instance.getTenantId());
+            task.setAssignedUserId(assignee);
+            task.setAssignedAt(now);
+        }
         task.setStateId(DEFAULT_STATE_ACTIVE);
         task.setCreatedAt(now);
         task.setUpdatedAt(now);

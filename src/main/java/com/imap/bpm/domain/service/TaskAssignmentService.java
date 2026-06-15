@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -91,5 +92,43 @@ public class TaskAssignmentService {
             return fallbackAssigneeUserId;
         }
         return starterUserId;
+    }
+
+    /** Namespace de permisos de cola (modelo A — ver workhub-northstar §6.2). */
+    public static final String QUEUE_PREFIX = "bpm.queue.";
+
+    /**
+     * WorkHub 3b.1 — resuelve el candidate group (cola) de un user_task desde su
+     * config. Soporta valor estático ("deposito_ba") o expresión "${var}" contra
+     * las variables del proceso. Devuelve el PERMISO de cola ('bpm.queue.<codigo>')
+     * o null si el user_task NO define candidate group (→ asignación directa).
+     * 3b.2 extenderá este punto con resolución por DMN.
+     */
+    @SuppressWarnings("unchecked")
+    public String resolveCandidateGroup(Map<String, Object> config, Map<String, Object> variables) {
+        if (config == null || config.isEmpty()) return null;
+        Object raw = config.get("candidateGroup");
+        if (raw == null && config.get("assignment") instanceof Map<?, ?> a) {
+            raw = ((Map<String, Object>) a).get("candidateGroup");
+        }
+        if (raw == null) return null;
+        String expr = raw.toString().trim();
+        if (expr.isEmpty()) return null;
+        String resolved = substituteVars(expr, variables).trim();
+        if (resolved.isEmpty()) return null;
+        return resolved.startsWith(QUEUE_PREFIX) ? resolved : QUEUE_PREFIX + resolved.toLowerCase();
+    }
+
+    /** Sustituye ${nombre} por el valor de la variable del proceso (3b.1; DMN en 3b.2). */
+    private static String substituteVars(String expr, Map<String, Object> variables) {
+        if (variables == null || !expr.contains("${")) return expr;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{([^}]+)\\}").matcher(expr);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            Object v = variables.get(m.group(1).trim());
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(v == null ? "" : v.toString()));
+        }
+        m.appendTail(sb);
+        return sb.toString();
     }
 }

@@ -318,13 +318,29 @@ public class BpmProcessController {
         String bearerToken = extractBearer(req);
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        List<TaskInstance> tasks = taskRepo.findByAssignedUserIdAndLifecycleInOrderByCreatedAtDesc(
-            userId, List.of("created", "reserved"));
+
+        // Asignadas a mí (assignee = yo)
+        List<TaskInstance> tasks = new ArrayList<>(
+            taskRepo.findByAssignedUserIdAndLifecycleInOrderByCreatedAtDesc(
+                userId, List.of("created", "reserved")));
+
+        // WorkHub 3b — tareas DE COLA: sin assignee, cuyo candidate group (permiso
+        // bpm.queue.X) está entre mis permisos del JWT para este tenant. Ver §6.2.
+        List<String> myQueuePerms = (user.permissionsByTenant() == null) ? List.of()
+            : user.permissionsByTenant()
+                  .getOrDefault(tenantId == null ? "" : tenantId.toString(), List.of())
+                  .stream().filter(p -> p != null && p.startsWith("bpm.queue.")).toList();
+        if (!myQueuePerms.isEmpty()) {
+            tasks.addAll(taskRepo
+                .findByTenantIdAndAssignedUserIdIsNullAndAssignedRoleInAndLifecycleInOrderByCreatedAtDesc(
+                    tenantId, myQueuePerms, List.of("created")));
+        }
 
         // WorkHub — vistas de la bandeja por fecha (today/overdue/upcoming).
         // Sin view (o "mine"/"all") devuelve todas. Ver workhub-northstar §1.1.
         if (view != null && !view.isBlank() && !view.equals("mine") && !view.equals("all")) {
-            tasks = tasks.stream().filter(t -> matchesDateView(view, t.getDueAt(), now)).toList();
+            tasks = new ArrayList<>(
+                tasks.stream().filter(t -> matchesDateView(view, t.getDueAt(), now)).toList());
         }
 
         // Cache local de definitions (mismo processversion → 1 load por request)
