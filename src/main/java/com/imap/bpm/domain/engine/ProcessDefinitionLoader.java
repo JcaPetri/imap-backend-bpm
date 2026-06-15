@@ -96,7 +96,13 @@ public class ProcessDefinitionLoader {
         // S2S al system con SERVICE TOKEN (no el bearer del request original).
         // El endpoint requiere system.admin que el service token siempre tiene.
         // Fallback al bearer del request si service token disabled (legacy).
-        final String svcToken = serviceTokenProvider.currentToken();
+        // tokenForTenant (no currentToken): el endpoint /v1/admin/bpm/** pasa por el
+        // TenantContextFilter de system que valida membership por X-Tenant-Id. currentToken()
+        // solo tiene SYSTEM_TENANT → el service account no es miembro del tenant del request
+        // → 403 en cache-miss (hoy enmascarado por el cache Caffeine). Mismo fix que listProcessdefs.
+        final String svcToken = tenantId != null
+            ? serviceTokenProvider.tokenForTenant(tenantId)
+            : serviceTokenProvider.currentToken();
         final String effectiveBearer = svcToken != null
             ? svcToken
             : (bearerToken != null ? bearerToken : BearerTokenHolder.get());
