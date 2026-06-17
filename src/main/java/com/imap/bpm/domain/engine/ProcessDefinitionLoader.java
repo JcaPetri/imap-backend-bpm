@@ -91,7 +91,8 @@ public class ProcessDefinitionLoader {
             log.debug("ProcessDefinitionLoader cache HIT: {}", processVersionId);
             return cached;
         }
-        log.info("ProcessDefinitionLoader cache MISS — fetching {} from system", processVersionId);
+        log.info("ProcessDefinitionLoader cache MISS — fetching {} from system (tenantId={})",
+            processVersionId, tenantId);
 
         // S2S al system con SERVICE TOKEN (no el bearer del request original).
         // El endpoint requiere system.admin que el service token siempre tiene.
