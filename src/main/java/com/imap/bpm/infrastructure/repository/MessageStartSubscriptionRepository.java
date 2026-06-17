@@ -7,7 +7,6 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -18,8 +17,8 @@ import java.util.UUID;
  *     /v1/bpm/messages/start. Devuelve TODAS las subscriptions activas que
  *     matchean (puede ser >1 si N processdefs distintos suscritos al mismo
  *     messageCode → broadcast).
- *   - findExistingForUpsert: lookup por unique constraint para evitar duplicar
- *     subscription cuando el loader re-carga un processdef.
+ *   - upsertActive: UPSERT atómico (ON CONFLICT) que reactiva o crea la
+ *     subscription cuando el loader re-carga un processdef (race-free).
  *   - deactivateOldVersions: al subir una version nueva, marca inactivas las
  *     viejas del mismo processdef_id+message_code+tenant (V1 simple: solo
  *     current version dispara).
@@ -35,19 +34,6 @@ public interface MessageStartSubscriptionRepository extends JpaRepository<Messag
     List<MessageStartSubscription> findActiveByTenantAndMessageCode(
         @Param("tenantId") UUID tenantId,
         @Param("messageCode") String messageCode);
-
-    @Query("""
-        SELECT s FROM MessageStartSubscription s
-        WHERE s.tenantId = :tenantId
-          AND s.messageCode = :messageCode
-          AND s.processversionId = :processversionId
-          AND s.startFlowElementId = :flowElementId
-        """)
-    Optional<MessageStartSubscription> findForUpsert(
-        @Param("tenantId") UUID tenantId,
-        @Param("messageCode") String messageCode,
-        @Param("processversionId") UUID processversionId,
-        @Param("flowElementId") UUID flowElementId);
 
     /**
      * Marca inactivas todas las subscriptions del mismo (tenant, messageCode, processdefId)
@@ -68,4 +54,33 @@ public interface MessageStartSubscriptionRepository extends JpaRepository<Messag
         @Param("messageCode") String messageCode,
         @Param("processdefId") UUID processdefId,
         @Param("currentVersionId") UUID currentVersionId);
+
+    /**
+     * UPSERT atómico de la subscription (race-free). Reactiva la existente
+     * (mismo unique tenant+message+version+startEvent) o la inserta si no existe.
+     *
+     * Reemplaza al patrón findForUpsert()+save() que NO era atómico: en cold-start
+     * (cache vacío tras restart) dos threads cargaban el mismo processversion en
+     * paralelo, ambos veían findForUpsert vacío e intentaban INSERT → el segundo
+     * daba "duplicate key bpm_pro_msg_start_sub_unique" (no fatal pero ruidoso).
+     * ON CONFLICT lo resuelve en el motor (nativo — no expresable en JPQL).
+     */
+    @Modifying
+    @Query(value = """
+        INSERT INTO bpm.bpm_pro_message_start_subscription_tbl
+            (id, tenant_id, message_code, processdef_id, processversion_id,
+             start_flow_element_id, is_active, state_id, created_at, updated_at)
+        VALUES (:id, :tenantId, :messageCode, :processdefId, :processversionId,
+                :startFlowElementId, true, :stateId, now(), now())
+        ON CONFLICT (tenant_id, message_code, processversion_id, start_flow_element_id)
+        DO UPDATE SET is_active = true, updated_at = now()
+        """, nativeQuery = true)
+    int upsertActive(
+        @Param("id") UUID id,
+        @Param("tenantId") UUID tenantId,
+        @Param("messageCode") String messageCode,
+        @Param("processdefId") UUID processdefId,
+        @Param("processversionId") UUID processversionId,
+        @Param("startFlowElementId") UUID startFlowElementId,
+        @Param("stateId") UUID stateId);
 }

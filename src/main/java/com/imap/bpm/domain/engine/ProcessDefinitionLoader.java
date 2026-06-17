@@ -266,8 +266,9 @@ public class ProcessDefinitionLoader {
         if (tenantId == null) tenantId = TenantContextHolder.get();
         if (tenantId == null || def.processdefId() == null) return;
 
-        // RLS: tabla bpm_pro_message_start_subscription_tbl tiene RLS habilitada
-        // (Fase 4 Día 0). Sin aplicar tenantSession los queries devuelven 0 rows.
+        // RLS: la tabla bpm_pro_message_start_subscription_tbl tiene RLS DESACTIVADA
+        // (V007 — su sync hace lookups cross-tenant; aislación por WHERE explícito).
+        // applyToCurrentTransaction se mantiene inocuo por consistencia del patrón.
         tenantSession.applyToCurrentTransaction();
 
         for (ProcessDefinition.FlowElement fe : def.flowElements()) {
@@ -276,25 +277,12 @@ public class ProcessDefinitionLoader {
             String messageCode = extractMessageCode(fe.config());
             if (messageCode == null) continue;
 
-            // 1. UPSERT: si ya existe la subscription para esta version+startEvent, marcarla active.
-            //    Si no existe, crearla.
-            Optional<MessageStartSubscription> existing = msgStartSubRepo.findForUpsert(
-                tenantId, messageCode, def.processVersionId(), fe.id());
-            MessageStartSubscription sub = existing.orElseGet(() -> {
-                MessageStartSubscription s = new MessageStartSubscription();
-                s.setId(UUID.randomUUID());
-                s.setTenantId(TenantContextHolder.get());
-                s.setMessageCode(messageCode);
-                s.setProcessdefId(def.processdefId());
-                s.setProcessversionId(def.processVersionId());
-                s.setStartFlowElementId(fe.id());
-                s.setStateId(DEFAULT_STATE_ACTIVE);
-                s.setCreatedAt(OffsetDateTime.now());
-                return s;
-            });
-            sub.setActive(true);
-            sub.setUpdatedAt(OffsetDateTime.now());
-            msgStartSubRepo.save(sub);
+            // 1. UPSERT atómico (race-free): reactiva la subscription de esta
+            //    version+startEvent o la crea. ON CONFLICT en el motor → sin la race
+            //    de cold-start del viejo find+save (ver repo.upsertActive).
+            msgStartSubRepo.upsertActive(
+                UUID.randomUUID(), tenantId, messageCode, def.processdefId(),
+                def.processVersionId(), fe.id(), DEFAULT_STATE_ACTIVE);
 
             // 2. Deactivate older subscriptions of same (tenant, messageCode, processdefId)
             //    pero con una processversionId distinta.
