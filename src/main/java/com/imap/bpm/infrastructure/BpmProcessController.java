@@ -118,9 +118,6 @@ public class BpmProcessController {
         UserContext user = UserContextHolder.get();
         UUID userId = user != null ? user.userId() : null;
         String bearerToken = extractBearer(req);
-        log.info("DIAG startProcess: hdr X-Tenant-Id={} resolved tenant={} userTenants={}",
-            req.getHeader("X-Tenant-Id"), tenantId,
-            user != null && user.permissionsByTenant() != null ? user.permissionsByTenant().keySet() : null);
 
         ProcessInstance instance = engine.startProcess(processVersionId,
             payload == null ? Map.of() : payload,

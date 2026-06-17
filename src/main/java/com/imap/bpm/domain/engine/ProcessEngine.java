@@ -258,10 +258,12 @@ public class ProcessEngine {
                                                   UUID userId,
                                                   UUID parentInstanceId,
                                                   UUID parentTokenId) {
-        // ProcessVersions viven en SYSTEM tenant (catalog cross-tenant). Pasar
-        // SYSTEM_TENANT_ID en el s2s; el `tenantId` param se usa para crear la
-        // instance + RLS en queries locales del schema bpm (no afecta este load).
-        ProcessDefinition def = loader.load(processVersionId, bearerToken, TenantContextHolder.SYSTEM_TENANT_ID);
+        // 3c.2 — cargar el processversion bajo el TENANT OPERATIVO (no hardcodear
+        // SYSTEM). La RLS de system muestra a cada tenant sus filas + las de SYSTEM
+        // (platform catalog), así que esto encuentra tanto processdefs propios del
+        // tenant como los seedeados bajo SYSTEM. Antes, hardcodear SYSTEM rompía el
+        // arranque de processdefs creados bajo un tenant operativo ("not found").
+        ProcessDefinition def = loader.load(processVersionId, bearerToken, tenantId);
         log.info("Starting process {} (v{}) for user {} parent={}",
             def.processdefCode(), def.version(), userId, parentInstanceId);
 
@@ -366,7 +368,7 @@ public class ProcessEngine {
                 token.setLifecycle("active");
                 token.setUpdatedAt(now);
                 tokenRepo.save(token);
-                ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, TenantContextHolder.SYSTEM_TENANT_ID);
+                ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
                 ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
                 if (current != null) {
                     consumeAndMoveToNext(instance, token, current, def, userId);
@@ -1019,7 +1021,7 @@ public class ProcessEngine {
         if (activityToken == null) {
             throw new IllegalStateException("Activity token not found for task " + taskInstanceId);
         }
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
         ProcessDefinition.FlowElement activity = def.findElementById(task.getFlowelementId());
         if (activity == null) throw new IllegalStateException("Activity element not found");
 
@@ -1545,7 +1547,7 @@ public class ProcessEngine {
         }
 
         ProcessDefinition parentDef = loader.load(parent.getProcessversionId(),
-            null, TenantContextHolder.SYSTEM_TENANT_ID);
+            null, parent.getTenantId());
         ProcessDefinition.FlowElement subProcessElement =
             parentDef.findElementById(parentToken.getCurrentElementId());
         if (subProcessElement == null) {
@@ -1808,7 +1810,7 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
         ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
         if (current == null) {
             log.error("advanceFromCorrelation: current element gone for token {}", token.getId());
@@ -1961,7 +1963,7 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
         ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
         if (current == null) return;
         audit(instance, "timer.fired", current.id(), token.getId(), null, Map.of(
@@ -2069,7 +2071,7 @@ public class ProcessEngine {
         metricInc("bpm.boundary.fired", instance.getProcessdefId().toString());
 
         // 3. Crear nuevo token en outgoing del boundary y avanzar
-        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, TenantContextHolder.SYSTEM_TENANT_ID);
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
         List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(boundaryElementId);
         if (outgoing.isEmpty()) {
             log.warn("boundary_event '{}' has no outgoing flow — instance may stall", boundaryCode);
