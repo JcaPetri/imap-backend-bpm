@@ -63,7 +63,11 @@ public class DecisionDefinitionLoader {
         // S2S al system con SERVICE TOKEN — endpoint requiere system.admin que
         // el user request original puede no tener. Fix 2026-05-19, mismo
         // patrón que ProcessDefinitionLoader.
-        final String svcToken = serviceTokenProvider.currentToken();
+        // 3c.1 — tokenForTenant (no currentToken): el endpoint /v1/admin/bpm/**
+        // valida membership por X-Tenant-Id; currentToken solo tiene SYSTEM_TENANT.
+        final String svcToken = tenantId != null
+            ? serviceTokenProvider.tokenForTenant(tenantId)
+            : serviceTokenProvider.currentToken();
         final String effectiveBearer = svcToken != null
             ? svcToken
             : (bearerToken != null ? bearerToken : BearerTokenHolder.get());

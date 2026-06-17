@@ -72,11 +72,15 @@ public class JobExecutorWorker {
         //   advanceToken (el worker no tiene JWT del user).
         // Importante: llamar engine.fireTimerJob(jobId) — Spring CGLIB proxy
         // intercepta llamadas externas y aplica @Transactional correctamente.
-        String svcToken = serviceTokenProvider.currentToken();
         for (JobScanService.DueJob d : dueJobs) {
             try {
                 TenantContextHolder.set(d.tenantId());
-                BearerTokenHolder.set(svcToken);
+                // 3c.1 — service token MIEMBRO del tenant del job (no currentToken,
+                // que solo tiene SYSTEM_TENANT). Si advanceToken hace un load()/DMN
+                // cache-miss s2s a system, el token debe ser miembro del tenant del
+                // job para pasar el TenantContextFilter. tokenForTenant cae a
+                // currentToken internamente cuando el tenant es SYSTEM.
+                BearerTokenHolder.set(serviceTokenProvider.tokenForTenant(d.tenantId()));
                 engine.fireTimerJob(d.jobId());
             } catch (Exception e) {
                 log.error("JobExecutorWorker: uncaught error processing job {}", d.jobId(), e);
