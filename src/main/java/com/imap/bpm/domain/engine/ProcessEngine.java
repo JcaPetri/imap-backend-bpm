@@ -699,12 +699,13 @@ public class ProcessEngine {
         // V1 hardcoded — si starter es service account → fallback admin.
         // Cuando llegue Iter 5 AssignmentRule real, acá se consulta
         // bpm_hum_assignmentrule del flowelement (user / role / group / expr).
-        // WorkHub 3b.1 — routing: si el user_task define candidate group (config
-        // candidateGroup, estático o ${var}) → tarea DE COLA (assignee null, claimable
-        // por quien tenga el permiso bpm.queue.<x>). Si no → asignación directa (actual).
-        // 3b.2: el candidate group se resolverá por DMN en este mismo punto.
+        // WorkHub 3b — routing del candidate group (modelo A + DMN, §6.2):
+        //   3b.2 DMN: config.candidateGroupDecision → tabla DMN multi-condición.
+        //   3b.1 estático/expr: config.candidateGroup ("deposito_ba" o "${var}").
+        // Si resuelve → tarea DE COLA (assignee null, claimable por quien tenga el
+        // permiso bpm.queue.<x>). Si no → asignación directa (actual).
         String candidateGroup = taskAssignmentService.resolveCandidateGroup(
-            userTask.config(), inputData);
+            userTask.config(), inputData, instance.getTenantId());
         if (candidateGroup != null) {
             task.setAssignedRole(candidateGroup);   // assignee + assigned_at quedan null hasta el claim
         } else {

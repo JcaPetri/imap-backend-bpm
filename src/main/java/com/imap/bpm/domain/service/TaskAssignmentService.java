@@ -1,5 +1,8 @@
 package com.imap.bpm.domain.service;
 
+import com.imap.bpm.domain.engine.DecisionDefinition;
+import com.imap.bpm.domain.engine.DecisionDefinitionLoader;
+import com.imap.bpm.domain.engine.DmnEvaluator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -7,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -53,6 +57,15 @@ public class TaskAssignmentService {
 
     private UUID fallbackAssigneeUserId;
 
+    /** 3b.2 — motor DMN para resolución de cola data-driven. */
+    private final DecisionDefinitionLoader decisionLoader;
+    private final DmnEvaluator dmnEvaluator;
+
+    public TaskAssignmentService(DecisionDefinitionLoader decisionLoader, DmnEvaluator dmnEvaluator) {
+        this.decisionLoader = decisionLoader;
+        this.dmnEvaluator = dmnEvaluator;
+    }
+
     @PostConstruct
     void init() {
         this.serviceUserIds = Set.copyOf(SERVICE_ACCOUNT_NAMES.stream()
@@ -97,16 +110,82 @@ public class TaskAssignmentService {
     /** Namespace de permisos de cola (modelo A — ver workhub-northstar §6.2). */
     public static final String QUEUE_PREFIX = "bpm.queue.";
 
+    /** Output var por defecto que la tabla DMN de ruteo debe producir (3b.2). */
+    private static final String DEFAULT_CG_OUTPUT_VAR = "candidateGroup";
+
     /**
-     * WorkHub 3b.1 — resuelve el candidate group (cola) de un user_task desde su
-     * config. Soporta valor estático ("deposito_ba") o expresión "${var}" contra
-     * las variables del proceso. Devuelve el PERMISO de cola ('bpm.queue.<codigo>')
-     * o null si el user_task NO define candidate group (→ asignación directa).
-     * 3b.2 extenderá este punto con resolución por DMN.
+     * WorkHub — resuelve el candidate group (cola) de un user_task. Modelo A + DMN
+     * (workhub-northstar §6.2). Orden de resolución:
+     *
+     *   1. 3b.2 — DMN: si config define `candidateGroupDecision` (decisionRef), se
+     *      evalúa esa tabla DMN contra las variables del proceso y se toma el output
+     *      `candidateGroup` (o `candidateGroupOutputVar` si se override). Ruteo
+     *      multi-condición (sucursal × tipo, umbrales, excepciones+default) editable
+     *      sin tocar el processdef.
+     *   2. 3b.1 — estático/expr: `candidateGroup` literal ("deposito_ba") o "${var}".
+     *
+     * Devuelve el PERMISO de cola ('bpm.queue.<codigo>') o null si el user_task NO
+     * define candidate group (→ asignación directa). Degradación segura: si el DMN
+     * falla / no matchea / no produce el output, cae al modo estático (y si tampoco
+     * hay estático, null → asignación directa). Nunca rompe la creación de la tarea.
      */
-    @SuppressWarnings("unchecked")
-    public String resolveCandidateGroup(Map<String, Object> config, Map<String, Object> variables) {
+    public String resolveCandidateGroup(Map<String, Object> config, Map<String, Object> variables,
+                                         UUID tenantId) {
         if (config == null || config.isEmpty()) return null;
+        String byDmn = resolveByDecision(config, variables, tenantId);
+        if (byDmn != null) return byDmn;
+        return resolveStatic(config, variables);
+    }
+
+    /** 3b.2 — resolución por tabla DMN. Devuelve null si no aplica / no matchea / error. */
+    @SuppressWarnings("unchecked")
+    private String resolveByDecision(Map<String, Object> config, Map<String, Object> variables,
+                                     UUID tenantId) {
+        Object raw = config.get("candidateGroupDecision");
+        if (raw == null && config.get("assignment") instanceof Map<?, ?> a) {
+            raw = ((Map<String, Object>) a).get("candidateGroupDecision");
+        }
+        if (raw == null) return null;
+        String decisionRef = raw.toString().trim();
+        if (decisionRef.isEmpty()) return null;
+
+        Object outVarRaw = config.get("candidateGroupOutputVar");
+        String outVar = (outVarRaw == null || outVarRaw.toString().isBlank())
+            ? DEFAULT_CG_OUTPUT_VAR : outVarRaw.toString().trim();
+
+        try {
+            DecisionDefinition decision = decisionLoader.load(decisionRef, null, tenantId);
+            DmnEvaluator.EvaluationResult res =
+                dmnEvaluator.evaluate(decision, variables == null ? Map.of() : variables);
+            if (res.totalMatched() == 0) {
+                log.info("resolveCandidateGroup: DMN '{}' no match (tenant={}) → fallback estático",
+                    decisionRef, tenantId);
+                return null;
+            }
+            Object out = res.outputs().get(outVar);
+            // hit policies multi (collect/...) devuelven List → tomamos el primero
+            if (out instanceof List<?> list) out = list.isEmpty() ? null : list.get(0);
+            if (out == null) {
+                log.warn("resolveCandidateGroup: DMN '{}' matcheó pero sin output '{}' → fallback estático",
+                    decisionRef, outVar);
+                return null;
+            }
+            String code = out.toString().trim();
+            if (code.isEmpty()) return null;
+            String normalized = code.startsWith(QUEUE_PREFIX) ? code : QUEUE_PREFIX + code.toLowerCase();
+            log.info("resolveCandidateGroup: DMN '{}' → '{}' (tenant={})",
+                decisionRef, normalized, tenantId);
+            return normalized;
+        } catch (Exception e) {
+            log.error("resolveCandidateGroup: DMN '{}' falló (tenant={}): {} → fallback estático",
+                decisionRef, tenantId, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 3b.1 — resolución estática ("deposito_ba") o por expresión "${var}". */
+    @SuppressWarnings("unchecked")
+    private String resolveStatic(Map<String, Object> config, Map<String, Object> variables) {
         Object raw = config.get("candidateGroup");
         if (raw == null && config.get("assignment") instanceof Map<?, ?> a) {
             raw = ((Map<String, Object>) a).get("candidateGroup");
