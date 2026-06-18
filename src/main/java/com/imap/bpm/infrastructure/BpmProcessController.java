@@ -14,6 +14,8 @@ import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.TaskInstanceRepository;
 import com.imap.bpm.infrastructure.repository.JobExecutorRepository;
 import com.imap.bpm.infrastructure.repository.MessageCorrelationRepository;
+import com.imap.bpm.infrastructure.repository.BpmInboxEventRepository;
+import com.imap.bpm.infrastructure.entity.BpmInboxEventEntity;
 import com.imap.bpm.infrastructure.repository.TokenRepository;
 import com.imap.bpm.infrastructure.repository.VariableRepository;
 import com.imap.platform.security.UserContext;
@@ -77,6 +79,7 @@ public class BpmProcessController {
     private final VariableRepository varRepo;
     private final JobExecutorRepository jobRepo;
     private final MessageCorrelationRepository msgCorrRepo;
+    private final BpmInboxEventRepository inboxRepo;
     private final ScoreService scoreService;
     private final SseEventBus sseEventBus;
 
@@ -93,6 +96,7 @@ public class BpmProcessController {
                                 VariableRepository varRepo,
                                 JobExecutorRepository jobRepo,
                                 MessageCorrelationRepository msgCorrRepo,
+                                BpmInboxEventRepository inboxRepo,
                                 ScoreService scoreService,
                                 SseEventBus sseEventBus) {
         this.engine = engine;
@@ -105,6 +109,7 @@ public class BpmProcessController {
         this.varRepo = varRepo;
         this.jobRepo = jobRepo;
         this.msgCorrRepo = msgCorrRepo;
+        this.inboxRepo = inboxRepo;
         this.scoreService = scoreService;
         this.sseEventBus = sseEventBus;
     }
@@ -163,8 +168,34 @@ public class BpmProcessController {
         UUID userId = user != null ? user.userId() : null;
         String bearerToken = extractBearer(req);
 
+        // Dedup at-least-once del outbox: si llega un eventId ya procesado, no re-arrancamos.
+        UUID eventId = null;
+        if (body.get("eventId") != null) {
+            try { eventId = UUID.fromString(body.get("eventId").toString()); }
+            catch (IllegalArgumentException ignore) { /* eventId mal formado → tratamos como sin dedup */ }
+        }
+        if (eventId != null && inboxRepo.existsByTenantIdAndEventId(tenantId, eventId)) {
+            log.info("messages/start dedup: eventId={} ya procesado (tenant={}) → skip", eventId, tenantId);
+            Map<String, Object> dedup = new java.util.LinkedHashMap<>();
+            dedup.put("messageCode", messageCode);
+            dedup.put("instancesStarted", 0);
+            dedup.put("instances", java.util.List.of());
+            dedup.put("deduped", true);
+            return dedup;
+        }
+
         java.util.List<ProcessInstance> instances = engine.startProcessByMessage(
             messageCode, variables, bearerToken, tenantId, userId);
+
+        // Registra el eventId procesado (loss-free: si el start falló tiramos antes de llegar acá;
+        // el dup solo es posible en la ventana angosta start-ok / record-fail). El unique atrapa carreras.
+        if (eventId != null) {
+            try {
+                inboxRepo.save(new BpmInboxEventEntity(tenantId, eventId, messageCode, instances.size()));
+            } catch (org.springframework.dao.DataIntegrityViolationException dup) {
+                log.info("messages/start dedup: eventId={} insertado concurrentemente (tenant={})", eventId, tenantId);
+            }
+        }
 
         java.util.List<Map<String, Object>> instResponses = new java.util.ArrayList<>(instances.size());
         for (ProcessInstance inst : instances) {
