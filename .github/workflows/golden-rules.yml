@@ -1,0 +1,25 @@
+name: Golden rules
+
+# Verifica que el banner de Reglas de Oro de cada archivo esté al día respecto de
+# golden-rules.json. Falla el build si hay drift. Solo comentarios → no toca runtime.
+
+on:
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Reglas de Oro al día (banner == golden-rules.json)
+        run: node scripts/stamp-golden-rules.mjs --check

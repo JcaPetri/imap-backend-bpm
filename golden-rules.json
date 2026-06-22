@@ -1,0 +1,74 @@
+{
+  "_comment": "Fuente ÚNICA de Reglas de Oro. Banner generado con scripts/stamp-golden-rules.mjs (NUNCA estampa migraciones Flyway), verificado por CI. NO editar banners a mano. Globs controller/money coarse.",
+  "doc": "IMAP_GUIA_DESARROLLO.md",
+  "rulesets": {
+    "global": [
+      "HTTP-only entre servicios (+ s2s auth; no SQL cross-service; futuro Kafka)",
+      "Names en inglés",
+      "UUIDv7 en ids",
+      "i18n: idioma del string, no de la fila; datos (UUID, field, idioma)",
+      "VtR: único canal con el frontend (front solo ve virtual)",
+      "Hexagonal estricto (domain no depende de infra)",
+      "No secrets en código (.env en C:\\Applications, nunca hardcodear)",
+      "Idempotencia en operaciones de negocio (idempotency key)"
+    ],
+    "persistence": [
+      "Audit7: tenant_id|state_id|created_at|created_by_id|updated_at|updated_by_id|owned_by_id",
+      "RLS por tenant + tenant_id en toda tabla",
+      "Soft-delete por state (archived), nunca DELETE físico",
+      "Naming SQL Opción B (id PK · _id FKs · _at timestamps · is_* booleans)",
+      "Flyway: cambios de schema versionados, nunca DDL ad-hoc en prod",
+      "Native queries: CAST(x AS t), NO x::t (Hibernate confunde :: con bind param)"
+    ],
+    "controller": [
+      "DTOs, nunca exponer entidades del domain en la API"
+    ],
+    "bpm": [
+      "Orquestador central (tipo Temporal/Step Functions)",
+      "processdef→processversion: snapshot inmutable al activar",
+      "Las defs de proceso viven acá (no en system)",
+      "Camunda 8 como norte; interim form-driven en prod"
+    ]
+  },
+  "apply": [
+    {
+      "globs": [
+        "**/*.java",
+        "**/*.sql"
+      ],
+      "rules": [
+        "global"
+      ]
+    },
+    {
+      "globs": [
+        "**/migration/**",
+        "**/db/**/*.sql",
+        "**/*Entity.java",
+        "**/domain/**/model/**"
+      ],
+      "rules": [
+        "persistence"
+      ]
+    },
+    {
+      "globs": [
+        "**/incontroller/**",
+        "**/*Controller.java",
+        "**/controller/**"
+      ],
+      "rules": [
+        "controller"
+      ]
+    },
+    {
+      "globs": [
+        "**/*.java",
+        "**/*.sql"
+      ],
+      "rules": [
+        "bpm"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+#!/bin/sh
+# IMAP — Reglas de Oro (pre-commit). Activar una vez por clon:
+#   git config core.hooksPath .githooks
+node scripts/stamp-golden-rules.mjs --check || {
+  echo "↳ banners desactualizados — corré: node scripts/stamp-golden-rules.mjs && git add -A"
+  exit 1
+}
