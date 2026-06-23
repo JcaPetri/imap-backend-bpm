@@ -57,7 +57,6 @@ public class MessageStartSubscription {
     @Column(name = "created_by_id")                                   private UUID createdById;
     @Column(name = "updated_by_id")                                   private UUID updatedById;
     @Column(name = "owned_by_id")                                     private UUID ownedById;
-    @Column(name = "timezone_id")                                     private UUID timezoneId;
     @Column(name = "table_history")                                   private String tableHistory;
     @Column(name = "data_language_id")                                private UUID dataLanguageId;
 
@@ -104,8 +103,6 @@ public class MessageStartSubscription {
     public UUID getOwnedById() { return ownedById; }
     public void setOwnedById(UUID ownedById) { this.ownedById = ownedById; }
 
-    public UUID getTimezoneId() { return timezoneId; }
-    public void setTimezoneId(UUID timezoneId) { this.timezoneId = timezoneId; }
 
     public String getTableHistory() { return tableHistory; }
     public void setTableHistory(String tableHistory) { this.tableHistory = tableHistory; }

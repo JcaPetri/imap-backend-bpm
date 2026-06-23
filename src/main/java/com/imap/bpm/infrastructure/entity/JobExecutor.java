@@ -61,7 +61,6 @@ public class JobExecutor {
     @Column(name = "created_by_id")                          private UUID createdById;
     @Column(name = "updated_by_id")                          private UUID updatedById;
     @Column(name = "owned_by_id")                            private UUID ownedById;
-    @Column(name = "timezone_id")                            private UUID timezoneId;
     @Column(name = "table_history")                          private String tableHistory;
     @Column(name = "data_language_id")                       private UUID dataLanguageId;
 
@@ -104,8 +103,6 @@ public class JobExecutor {
     public void setUpdatedById(UUID id)       { this.updatedById = id; }
     public UUID getOwnedById()                { return ownedById; }
     public void setOwnedById(UUID id)         { this.ownedById = id; }
-    public UUID getTimezoneId()               { return timezoneId; }
-    public void setTimezoneId(UUID id)        { this.timezoneId = id; }
     public String getTableHistory()           { return tableHistory; }
     public void setTableHistory(String s)     { this.tableHistory = s; }
     public UUID getDataLanguageId()           { return dataLanguageId; }
