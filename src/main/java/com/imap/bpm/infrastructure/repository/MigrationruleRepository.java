@@ -24,4 +24,12 @@ import java.util.UUID;
 
 public interface MigrationruleRepository extends JpaRepository<Migrationrule, UUID> {
     List<Migrationrule> findByMigrationplanIdOrderBySortOrder(UUID migrationplanId);
+
+    /** F4-mgmt updateRules: borra las rules del plan antes de recrearlas.
+     *  Bulk @Modifying (ejecución inmediata, devuelve int — NO long, Spring Data lo rechaza)
+     *  — un deleteBy derivado es find-then-remove diferido y Hibernate ordena INSERTS antes
+     *  que DELETES en el flush → colisión de unique key al recrear. */
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query("delete from Migrationrule r where r.migrationplanId = ?1")
+    int deleteByMigrationplanId(UUID migrationplanId);
 }

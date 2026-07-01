@@ -35,9 +35,9 @@ import java.util.UUID;
  *
  *   POST /v1/bpm/migrations/apply/{planId}  → aplica plan a instances vivas de v1
  *
- * El management del plan (create/list/edit/validate) vive en el microservicio
- * SYSTEM bajo /v1/admin/bpm/migration-plans. Acá solo va el APPLY porque
- * modifica tokens + processinstances + audit log que viven en schema bpm.
+ * El management del plan (create/list/edit/validate) vive en bpm relacional
+ * (F4-mgmt Chunk B) bajo /v1/bpm/admin/migration-plans — MigrationPlanAdminController.
+ * Acá va el APPLY porque modifica tokens + processinstances + audit log de schema bpm.
  *
  * Permiso: requiere system.admin (mismo que el resto del admin BPM).
  * Por ahora el guard es implícito (el JWT debe tener system.admin para
@@ -59,14 +59,15 @@ public class MigrationController {
      *   {instancesAffected, tokensMapped, tokensCancelled, errors[], warnings[]}
      *
      * Errores comunes:
-     *   400 — plan no está en status 'validated' (debe validarse primero en SYSTEM)
+     *   400 — plan no está en status 'validated' (validar primero via /v1/bpm/admin/migration-plans/{id}/validate)
      *   400 — plan ya está 'applied' (idempotency: re-apply rechazado)
      *   404 — plan no existe
      *   500 — falla parcial; el ApplyReport.errors trae detalle por instance
      *
-     * El SYSTEM se entera del resultado via callback s2s (TODO V1.1: por ahora
-     * solo log). El frontend debe re-fetchear el plan via SYSTEM para ver el
-     * status actualizado.
+     * El resultado (status applied/failed + appliedAt/appliedBy/stats) lo marca el
+     * propio apply LOCAL via MigrationPlanManagementService.markApplyResult (F4-mgmt
+     * Chunk B — antes era un callback s2s al SYSTEM). El frontend re-fetchea el plan
+     * via /v1/bpm/admin/migration-plans/{id} para ver el status actualizado.
      */
     @PostMapping("/apply/{planId}")
     public ResponseEntity<MigrationApplyService.ApplyReport> applyPlan(
