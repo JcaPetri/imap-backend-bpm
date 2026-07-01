@@ -25,6 +25,10 @@ import java.util.UUID;
 public interface FlowelementRepository extends JpaRepository<Flowelement, UUID> {
     List<Flowelement> findByProcessversionIdOrderBySortOrder(UUID processversionId);
 
-    /** F4-mgmt update: borra los flowelements de la version antes de recrear su shape. */
+    /** F4-mgmt update: borra los flowelements de la version antes de recrear su shape.
+     *  Bulk @Modifying (ejecución inmediata) — un deleteBy derivado es find-then-remove
+     *  diferido y Hibernate ordena INSERTS antes que DELETES en el flush → colisión uq. */
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query("delete from Flowelement f where f.processversionId = ?1")
     long deleteByProcessversionId(UUID processversionId);
 }
