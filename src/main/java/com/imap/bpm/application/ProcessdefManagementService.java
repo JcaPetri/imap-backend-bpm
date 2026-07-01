@@ -131,6 +131,11 @@ public class ProcessdefManagementService {
         pd.setLifecycle(req.header().lifecycle());
         pd.setStartPermission(blankToNull(req.header().startPermission()));
         stampAudit(pd::setTenantId, pd::setStateId, pd::setCreatedById, pd::setOwnedById, tenantId, userId);
+        // created_at/updated_at explícitos: el processdef se re-guarda (UPDATE al setear
+        // currentversion_id) y ese UPDATE mandaría created_at=NULL (la entity en memoria no
+        // toma el DEFAULT now() del INSERT) → viola NOT NULL. Los demás son single-INSERT.
+        pd.setCreatedAt(now);
+        pd.setUpdatedAt(now);
         processdefRepository.save(pd);
 
         // 3. Processversion v1
