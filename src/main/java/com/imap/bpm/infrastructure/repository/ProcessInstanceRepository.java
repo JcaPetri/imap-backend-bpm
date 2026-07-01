@@ -32,4 +32,12 @@ public interface ProcessInstanceRepository extends JpaRepository<ProcessInstance
 
     /** Hito 3 — migration: instances vivas en una processversion source. */
     List<ProcessInstance> findByProcessversionIdAndLifecycle(UUID processversionId, String lifecycle);
+
+    // ── Counts LOCALES (F4-mgmt: disuelven el SQL cross-service que hacía system a bpm) ──
+    /** Count de instances de una processversion en un lifecycle dado (ej. 'active'). */
+    long countByProcessversionIdAndLifecycle(UUID processversionId, String lifecycle);
+    /** Count de instances de un processdef en un lifecycle dado (guard G1 del update). */
+    long countByProcessdefIdAndLifecycle(UUID processdefId, String lifecycle);
+    /** Count total de instances (todos los lifecycles) de una processversion. */
+    long countByProcessversionId(UUID processversionId);
 }

@@ -24,4 +24,7 @@ import java.util.UUID;
 
 public interface FlowelementRepository extends JpaRepository<Flowelement, UUID> {
     List<Flowelement> findByProcessversionIdOrderBySortOrder(UUID processversionId);
+
+    /** F4-mgmt update: borra los flowelements de la version antes de recrear su shape. */
+    long deleteByProcessversionId(UUID processversionId);
 }

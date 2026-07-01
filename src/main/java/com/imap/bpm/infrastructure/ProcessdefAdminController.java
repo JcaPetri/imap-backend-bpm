@@ -40,10 +40,13 @@ import java.util.UUID;
  * IMAP_BPM_OWNERSHIP_MIGRATION.md). Aditivo — no toca los endpoints existentes
  * de BpmProcessController.
  *
- *   POST /v1/bpm/admin/processdef              → create (+ v1 + grafo, atómico)
- *   GET  /v1/bpm/admin/processdef              → listAll del tenant
- *   GET  /v1/bpm/admin/processdef/{id}         → detalle completo (shape builder)
- *   GET  /v1/bpm/admin/processdef/{id}/versions→ versiones del processdef
+ *   POST   /v1/bpm/admin/processdef              → create (+ v1 + grafo, atómico)
+ *   GET    /v1/bpm/admin/processdef              → listAll del tenant
+ *   GET    /v1/bpm/admin/processdef/{id}         → detalle completo (shape builder)
+ *   GET    /v1/bpm/admin/processdef/{id}/versions→ versiones del processdef (+ instance counts locales)
+ *   PUT    /v1/bpm/admin/processdef/{id}         → update in-place de la version vigente (409 si active)
+ *   DELETE /v1/bpm/admin/processdef/{id}         → soft-delete (lifecycle=inactive)
+ *   POST   /v1/bpm/admin/processdef/{id}/versions→ publish nueva version (v=N+1, non-destructive)
  *
  * Cada endpoint abre tx + aplica tenantSession en la primera línea (bpm setea el
  * GUC de tenant; el user_id se propaga explícito al service para el núcleo audit-7).
@@ -96,5 +99,71 @@ public class ProcessdefAdminController {
     public List<Map<String, Object>> listVersions(@PathVariable("id") String id) {
         tenantSession.applyToCurrentTransaction();
         return service.listVersions(UUID.fromString(id));
+    }
+
+    /**
+     * Update in-place del processdef + shape de la version vigente. 404 si no existe,
+     * 409 (IllegalStateException del service, vía GlobalExceptionHandler) si hay
+     * instances activas, 400 si la validación cruzada falla.
+     */
+    @PutMapping("/processdef/{id}")
+    @Transactional
+    public ResponseEntity<CreateProcessdefResponse> update(@PathVariable("id") String id,
+                                                           @RequestBody CreateProcessdefRequest req) {
+        tenantSession.applyToCurrentTransaction();
+        UUID tenantId = TenantContextHolder.get();
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        try {
+            CreateProcessdefResponse resp = service.update(UUID.fromString(id), req, tenantId, userId);
+            return ResponseEntity.ok(resp);
+        } catch (IllegalArgumentException ex) {
+            if (isNotFound(ex)) return ResponseEntity.notFound().build();
+            throw ex;   // otras validaciones → 400 vía GlobalExceptionHandler
+        }
+    }
+
+    /**
+     * Soft-delete: lifecycle=inactive. 204 No Content si OK, 404 si no existe.
+     */
+    @DeleteMapping("/processdef/{id}")
+    @Transactional
+    public ResponseEntity<Void> softDelete(@PathVariable("id") String id) {
+        tenantSession.applyToCurrentTransaction();
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        try {
+            service.softDelete(UUID.fromString(id), userId);
+            return ResponseEntity.noContent().build();
+        } catch (IllegalArgumentException ex) {
+            if (isNotFound(ex)) return ResponseEntity.notFound().build();
+            throw ex;
+        }
+    }
+
+    /**
+     * Publica una nueva version (v=N+1) non-destructive. 404 si no existe,
+     * 400 si la validación cruzada falla.
+     */
+    @PostMapping("/processdef/{id}/versions")
+    @Transactional
+    public ResponseEntity<CreateProcessdefResponse> publishNewVersion(@PathVariable("id") String id,
+                                                                      @RequestBody CreateProcessdefRequest req) {
+        tenantSession.applyToCurrentTransaction();
+        UUID tenantId = TenantContextHolder.get();
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        try {
+            CreateProcessdefResponse resp = service.publishNewVersion(UUID.fromString(id), req, tenantId, userId);
+            return ResponseEntity.ok(resp);
+        } catch (IllegalArgumentException ex) {
+            if (isNotFound(ex)) return ResponseEntity.notFound().build();
+            throw ex;
+        }
+    }
+
+    /** El service tira IllegalArgumentException("Processdef not found: ...") cuando no existe → 404. */
+    private static boolean isNotFound(IllegalArgumentException ex) {
+        return ex.getMessage() != null && ex.getMessage().startsWith("Processdef not found");
     }
 }

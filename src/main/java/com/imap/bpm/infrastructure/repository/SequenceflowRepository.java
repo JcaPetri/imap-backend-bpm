@@ -24,4 +24,7 @@ import java.util.UUID;
 
 public interface SequenceflowRepository extends JpaRepository<Sequenceflow, UUID> {
     List<Sequenceflow> findByProcessversionIdOrderBySortOrder(UUID processversionId);
+
+    /** F4-mgmt update: borra los sequenceflows de la version antes de recrear su shape. */
+    long deleteByProcessversionId(UUID processversionId);
 }

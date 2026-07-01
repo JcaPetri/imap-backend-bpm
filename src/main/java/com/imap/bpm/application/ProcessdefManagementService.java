@@ -26,6 +26,7 @@ import com.imap.bpm.infrastructure.entity.Processversion;
 import com.imap.bpm.infrastructure.entity.Sequenceflow;
 import com.imap.bpm.infrastructure.entity.Taskform;
 import com.imap.bpm.infrastructure.repository.FlowelementRepository;
+import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.ProcessdefRepository;
 import com.imap.bpm.infrastructure.repository.ProcessversionRepository;
 import com.imap.bpm.infrastructure.repository.SequenceflowRepository;
@@ -75,6 +76,7 @@ public class ProcessdefManagementService {
     private final FlowelementRepository flowelementRepository;
     private final SequenceflowRepository sequenceflowRepository;
     private final TaskformRepository taskformRepository;
+    private final ProcessInstanceRepository processInstanceRepository;
     private final SystemEntityResolver systemEntityResolver;
     private final ObjectMapper mapper;
 
@@ -83,6 +85,7 @@ public class ProcessdefManagementService {
                                        FlowelementRepository flowelementRepository,
                                        SequenceflowRepository sequenceflowRepository,
                                        TaskformRepository taskformRepository,
+                                       ProcessInstanceRepository processInstanceRepository,
                                        SystemEntityResolver systemEntityResolver,
                                        ObjectMapper mapper) {
         this.processdefRepository = processdefRepository;
@@ -90,6 +93,7 @@ public class ProcessdefManagementService {
         this.flowelementRepository = flowelementRepository;
         this.sequenceflowRepository = sequenceflowRepository;
         this.taskformRepository = taskformRepository;
+        this.processInstanceRepository = processInstanceRepository;
         this.systemEntityResolver = systemEntityResolver;
         this.mapper = mapper;
     }
@@ -157,12 +161,31 @@ public class ProcessdefManagementService {
         pd.setCurrentversionId(pv.getId());
         processdefRepository.save(pd);
 
-        // 5. Flow elements → mapa code→id (para resolver source/target + taskforms)
+        // 5-7. Grafo (flowElements → sequenceFlows → taskForms) sobre la version v1.
+        writeGraph(req, pv.getId(), tenantId, userId);
+
+        log.info("Processdef created code='{}' id={} v1={} (fe={}, sf={}, tf={})",
+            pd.getCode(), pd.getId(), pv.getId(), feCount, sfCount, tfCount);
+
+        return new CreateProcessdefResponse(pd.getId(), pv.getId(), 1,
+            new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
+            "Processdef created", false);
+    }
+
+    /**
+     * Escribe el grafo (flowElements → sequenceFlows → taskForms) sobre la
+     * processversion dada. Reutilizado por create/update/publishNewVersion.
+     * Devuelve el mapa code→flowelementId (por si el caller lo necesita).
+     * Todas las entities son single-INSERT → created_at lo llena el DEFAULT now().
+     */
+    private Map<String, UUID> writeGraph(CreateProcessdefRequest req, UUID processversionId,
+                                         UUID tenantId, UUID userId) {
+        // Flow elements → mapa code→id (para resolver source/target + taskforms)
         Map<String, UUID> feIdByCode = new LinkedHashMap<>();
         for (CreateProcessdefRequest.FlowElement fe : req.flowElements()) {
             Flowelement e = new Flowelement();
             e.setId(UUID.randomUUID());
-            e.setProcessversionId(pv.getId());
+            e.setProcessversionId(processversionId);
             e.setElementCode(fe.code());
             e.setElementType(fe.type());
             e.setName(fe.name());
@@ -176,12 +199,12 @@ public class ProcessdefManagementService {
             feIdByCode.put(fe.code(), e.getId());
         }
 
-        // 6. Sequence flows (source/target resueltos del mapa)
+        // Sequence flows (source/target resueltos del mapa)
         if (req.sequenceFlows() != null) {
             for (CreateProcessdefRequest.SequenceFlow sf : req.sequenceFlows()) {
                 Sequenceflow e = new Sequenceflow();
                 e.setId(UUID.randomUUID());
-                e.setProcessversionId(pv.getId());
+                e.setProcessversionId(processversionId);
                 e.setSourceId(feIdByCode.get(sf.sourceCode()));   // no-null garantizado por validateRequest
                 e.setTargetId(feIdByCode.get(sf.targetCode()));
                 e.setConditionExpr(blankToNull(sf.conditionExpr()));
@@ -194,7 +217,7 @@ public class ProcessdefManagementService {
             }
         }
 
-        // 7. Task forms (flowElementId del mapa; entitydefId resuelto s2s)
+        // Task forms (flowElementId del mapa; entitydefId resuelto s2s)
         if (req.taskForms() != null) {
             for (CreateProcessdefRequest.TaskForm tf : req.taskForms()) {
                 Taskform e = new Taskform();
@@ -209,13 +232,216 @@ public class ProcessdefManagementService {
                 taskformRepository.save(e);
             }
         }
+        return feIdByCode;
+    }
 
-        log.info("Processdef created code='{}' id={} v1={} (fe={}, sf={}, tf={})",
-            pd.getCode(), pd.getId(), pv.getId(), feCount, sfCount, tfCount);
+    // ════════════════════════════════════════════════════════════════════════
+    //  UPDATE / SOFT-DELETE / PUBLISH NEW VERSION (F4-mgmt Chunk A)
+    // ════════════════════════════════════════════════════════════════════════
 
-        return new CreateProcessdefResponse(pd.getId(), pv.getId(), 1,
+    /**
+     * Update FULL del processdef (header + shape completo de la version vigente).
+     * Portada fiel de system.ProcessdefAdminService.update (líneas 303-433).
+     *
+     * v1-only in-place: reemplaza el shape de la CURRENT processversion (borra sus
+     * flowElements/sequenceFlows/taskforms y los recrea desde el req). NO crea v2
+     * (para eso está publishNewVersion).
+     *
+     * GUARD G1 (ahora LOCAL, ya no SQL cross-service): bloquea con 409 si hay
+     * instances activas (lifecycle='active') para no romper runtime.
+     *
+     * El controller ya abrió la tx + aplicó tenantSession.
+     */
+    public CreateProcessdefResponse update(UUID processdefId, CreateProcessdefRequest req,
+                                           UUID tenantId, UUID userId) {
+        boolean dryRun = Boolean.TRUE.equals(req.dryRun());
+
+        // 1. Verificar existencia (null → el controller devuelve 404)
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        if (pd == null) {
+            throw new IllegalArgumentException("Processdef not found: " + processdefId);
+        }
+
+        // 2. Code es IMMUTABLE
+        if (!Objects.equals(pd.getCode(), req.header().code())) {
+            throw new IllegalArgumentException(
+                "Cannot change code (was '" + pd.getCode() + "', got '" + req.header().code()
+                + "'). Create a new processdef with the new code instead.");
+        }
+
+        // 3. GUARD de instances activas (G1 local — antes era SQL cross-service system→bpm)
+        long active = processInstanceRepository.countByProcessdefIdAndLifecycle(processdefId, "active");
+        if (active > 0) {
+            throw new IllegalStateException(
+                "Cannot edit processdef with " + active + " active instance(s). "
+                + "Cancel them first, or create a new processdef with a different code.");
+        }
+
+        // 4. Validación cruzada (isUpdate=true → NO chequea unicidad del code)
+        validateRequest(req, true, tenantId);
+
+        int feCount = req.flowElements() == null ? 0 : req.flowElements().size();
+        int sfCount = req.sequenceFlows() == null ? 0 : req.sequenceFlows().size();
+        int tfCount = req.taskForms() == null ? 0 : req.taskForms().size();
+
+        if (dryRun) {
+            return new CreateProcessdefResponse(processdefId, null, 1,
+                new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
+                "Dry-run update OK", true);
+        }
+
+        // 5. Resolver la current processversion (puntero, o la única si el puntero está vacío)
+        Processversion pv = null;
+        if (pd.getCurrentversionId() != null) {
+            pv = processversionRepository.findById(pd.getCurrentversionId()).orElse(null);
+        }
+        if (pv == null) {
+            List<Processversion> versions = processversionRepository
+                .findByProcessdefIdOrderByVersionDesc(processdefId);
+            if (!versions.isEmpty()) pv = versions.get(0);
+        }
+        if (pv == null) {
+            throw new IllegalStateException("Processversion not found for processdef " + processdefId);
+        }
+        UUID pvId = pv.getId();
+
+        // 6. Borrar shape existente de la version (taskforms → sequenceflows → flowelements)
+        //    Los taskforms cuelgan de los flowelements, así que se borran ANTES.
+        List<Flowelement> existingFe = flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
+        if (!existingFe.isEmpty()) {
+            List<UUID> feIds = new ArrayList<>(existingFe.size());
+            for (Flowelement fe : existingFe) feIds.add(fe.getId());
+            taskformRepository.deleteByFlowelementIdIn(feIds);
+        }
+        sequenceflowRepository.deleteByProcessversionId(pvId);
+        flowelementRepository.deleteByProcessversionId(pvId);
+
+        // 7. Recrear el grafo desde el req sobre la MISMA version
+        writeGraph(req, pvId, tenantId, userId);
+
+        // 8. Actualizar header del processdef (code NO se toca — ya validado immutable).
+        //    Cargamos la entity existente (ya tiene created_at de la DB) → el UPDATE preserva created_at.
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        pd.setName(req.header().name());
+        pd.setDescription(req.header().description());
+        pd.setLifecycle(req.header().lifecycle());
+        pd.setStartPermission(blankToNull(req.header().startPermission()));
+        pd.setUpdatedById(userId);
+        pd.setUpdatedAt(now);
+        processdefRepository.save(pd);
+
+        log.info("Processdef updated — code='{}' processdefId={} pv={} fe={} sf={} tf={}",
+            pd.getCode(), processdefId, pvId, feCount, sfCount, tfCount);
+
+        return new CreateProcessdefResponse(processdefId, pvId,
+            pv.getVersion() == null ? 1 : pv.getVersion(),
             new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
-            "Processdef created", false);
+            "Updated successfully", false);
+    }
+
+    /**
+     * Soft-delete: lifecycle='inactive'. NO borra nada, NO afecta instances vivas —
+     * solo impide arrancar nuevas. Portada fiel de system.softDelete (líneas 440-462).
+     * Carga la entity existente (preserva created_at) y solo modifica lifecycle + updated_at.
+     */
+    public void softDelete(UUID processdefId, UUID userId) {
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        if (pd == null) {
+            throw new IllegalArgumentException("Processdef not found: " + processdefId);
+        }
+        pd.setLifecycle("inactive");
+        pd.setUpdatedById(userId);
+        pd.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        processdefRepository.save(pd);
+        log.info("Processdef {} soft-deleted (lifecycle=inactive)", processdefId);
+    }
+
+    /**
+     * Publica una NUEVA processversion (v=N+1) con el shape provisto. NON-destructive:
+     * las versions anteriores quedan intactas (instances vivas siguen con su version).
+     * currentVersionId apunta a la nueva → las nuevas instances usan v(N+1).
+     * Portada fiel de system.publishNewVersion (líneas 554+).
+     *
+     * Diferencia con update(): update reemplaza shape de la version vigente in-place
+     * (bloquea con instances activas); publishNewVersion crea una version nueva (NO
+     * bloquea — las viejas siguen safe).
+     */
+    public CreateProcessdefResponse publishNewVersion(UUID processdefId, CreateProcessdefRequest req,
+                                                      UUID tenantId, UUID userId) {
+        boolean dryRun = Boolean.TRUE.equals(req.dryRun());
+
+        // 1. Verificar existencia
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        if (pd == null) {
+            throw new IllegalArgumentException("Processdef not found: " + processdefId);
+        }
+
+        // 2. Code immutable (las versions de un mismo processdef comparten code)
+        if (!Objects.equals(pd.getCode(), req.header().code())) {
+            throw new IllegalArgumentException(
+                "Cannot change code when publishing new version (was '" + pd.getCode()
+                + "', got '" + req.header().code() + "'). For a different code, create a new processdef.");
+        }
+
+        // 3. Validación cruzada (isUpdate=true → NO chequea unicidad del code)
+        validateRequest(req, true, tenantId);
+
+        // 4. version = max(existing) + 1
+        List<Processversion> versions = processversionRepository
+            .findByProcessdefIdOrderByVersionDesc(processdefId);
+        int currentMaxVer = 0;
+        if (!versions.isEmpty() && versions.get(0).getVersion() != null) {
+            currentMaxVer = versions.get(0).getVersion();
+        }
+        int newVer = currentMaxVer + 1;
+
+        int feCount = req.flowElements() == null ? 0 : req.flowElements().size();
+        int sfCount = req.sequenceFlows() == null ? 0 : req.sequenceFlows().size();
+        int tfCount = req.taskForms() == null ? 0 : req.taskForms().size();
+
+        if (dryRun) {
+            return new CreateProcessdefResponse(processdefId, null, newVer,
+                new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
+                "Dry-run publish v" + newVer + " OK", true);
+        }
+
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+        // 5. Crear la nueva processversion (single-INSERT)
+        Processversion pv = new Processversion();
+        pv.setId(UUID.randomUUID());
+        pv.setProcessdefId(processdefId);
+        pv.setVersion(newVer);
+        pv.setPublishedAt(now);
+        pv.setDefinition("{}");
+        pv.setLocked(true);
+        pv.setDescription("v" + newVer + " of " + req.header().code());
+        pv.setTenantId(tenantId);
+        pv.setStateId(DEFAULT_STATE_ACTIVE);
+        pv.setCreatedById(userId);
+        pv.setOwnedById(userId);
+        processversionRepository.save(pv);
+
+        // 6. Grafo de la nueva version
+        writeGraph(req, pv.getId(), tenantId, userId);
+
+        // 7. Header del processdef puede haber cambiado (name/description/lifecycle);
+        //    code NO. Cargamos la entity existente → preserva created_at. Puntero al nuevo.
+        pd.setName(req.header().name());
+        pd.setDescription(req.header().description());
+        pd.setLifecycle(req.header().lifecycle());
+        pd.setStartPermission(blankToNull(req.header().startPermission()));
+        pd.setCurrentversionId(pv.getId());
+        pd.setUpdatedById(userId);
+        pd.setUpdatedAt(now);
+        processdefRepository.save(pd);
+
+        log.info("Published v{} of processdef code='{}' processdefId={} newPv={} fe={} sf={} tf={}",
+            newVer, pd.getCode(), processdefId, pv.getId(), feCount, sfCount, tfCount);
+
+        return new CreateProcessdefResponse(processdefId, pv.getId(), newVer,
+            new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
+            "Published v" + newVer + " successfully", false);
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -330,10 +556,8 @@ public class ProcessdefManagementService {
      * Lista las versiones del processdef (processversionId, version, publishedAt,
      * isLocked, isCurrent), ordenadas por version ascendente.
      *
-     * TODO(cross-service): los counts de instancias por versión (activeInstances/
-     * totalInstances) quedan en 0 — las processinstances viven en bpm pero el
-     * conteo por versión se agrega en una iter posterior (evitamos acoplar el
-     * read de mgmt al runtime). No hacer SQL cross-service.
+     * Los counts de instancias por versión (activeInstances/totalInstances) son
+     * queries LOCALES en bpm (F4-mgmt disolvió el SQL cross-service que hacía system).
      */
     public List<Map<String, Object>> listVersions(UUID processdefId) {
         Processdef pd = processdefRepository.findById(processdefId).orElse(null);
@@ -353,8 +577,10 @@ public class ProcessdefManagementService {
             m.put("publishedAt", v.getPublishedAt());
             m.put("isLocked", v.isLocked());
             m.put("isCurrent", currentVerId != null && currentVerId.equals(v.getId()));
-            m.put("activeInstances", 0L);   // TODO cross-service: contar por processversion_id
-            m.put("totalInstances", 0L);
+            m.put("activeInstances",
+                processInstanceRepository.countByProcessversionIdAndLifecycle(v.getId(), "active"));
+            m.put("totalInstances",
+                processInstanceRepository.countByProcessversionId(v.getId()));
             out.add(m);
         }
         return out;
