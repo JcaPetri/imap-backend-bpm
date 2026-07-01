@@ -85,7 +85,7 @@ public class LocalDefinitionReader {
         for (Flowelement fe : feEntities) {
             flowElements.add(new ProcessDefinition.FlowElement(
                 fe.getId(), fe.getElementCode(), fe.getElementType(), fe.getName(),
-                parseMap(fe.getConfig()), fe.getSortOrder() == null ? 0 : fe.getSortOrder()));
+                parseMap(fe.getConfig()), fe.getSortOrder() == null ? Integer.MAX_VALUE : fe.getSortOrder()));
         }
 
         List<ProcessDefinition.SequenceFlow> sequenceFlows = new ArrayList<>();
@@ -93,7 +93,7 @@ public class LocalDefinitionReader {
             sequenceFlows.add(new ProcessDefinition.SequenceFlow(
                 sf.getId(), sf.getSourceId(), sf.getTargetId(),
                 codeById.get(sf.getSourceId()), codeById.get(sf.getTargetId()),
-                sf.getConditionExpr(), sf.getSortOrder() == null ? 0 : sf.getSortOrder()));
+                sf.getConditionExpr(), sf.getSortOrder() == null ? Integer.MAX_VALUE : sf.getSortOrder()));
         }
 
         List<UUID> feIds = new ArrayList<>(codeById.keySet());

@@ -54,14 +54,20 @@ public class DecisionDefinitionLoader {
     private final ObjectMapper jackson;
     private final Cache<String, DecisionDefinition> cache;
     private final BpmServiceTokenProvider serviceTokenProvider;
+    private final LocalDefinitionReader localReader;
+    private volatile String defSource;
 
     public DecisionDefinitionLoader(@Value("${imap.system.base-url:http://localhost:8092/imap/system}")
                                     String systemBaseUrl,
                                     ObjectMapper jackson,
-                                    BpmServiceTokenProvider serviceTokenProvider) {
+                                    BpmServiceTokenProvider serviceTokenProvider,
+                                    LocalDefinitionReader localReader,
+                                    @Value("${bpm.defs.source:system}") String defSource) {
         this.http = WebClient.builder().baseUrl(systemBaseUrl).build();
         this.jackson = jackson;
         this.serviceTokenProvider = serviceTokenProvider;
+        this.localReader = localReader;
+        this.defSource = defSource;
         this.cache = Caffeine.newBuilder()
             .maximumSize(200)
             .expireAfterWrite(Duration.ofDays(365))
@@ -74,13 +80,35 @@ public class DecisionDefinitionLoader {
             log.debug("DecisionDefinitionLoader cache HIT: {}", decisionCode);
             return cached;
         }
-        log.info("DecisionDefinitionLoader cache MISS — fetching '{}' from system", decisionCode);
+        log.info("DecisionDefinitionLoader cache MISS — fetching '{}' (source={})", decisionCode, defSource);
 
-        // S2S al system con SERVICE TOKEN — endpoint requiere system.admin que
-        // el user request original puede no tener. Fix 2026-05-19, mismo
-        // patrón que ProcessDefinitionLoader.
-        // 3c.1 — tokenForTenant (no currentToken): el endpoint /v1/admin/bpm/**
-        // valida membership por X-Tenant-Id; currentToken solo tiene SYSTEM_TENANT.
+        DecisionDefinition def = "local".equalsIgnoreCase(defSource)
+            ? localReader.loadDecisionDefinition(tenantId, decisionCode)
+            : fetchFromSystem(decisionCode, bearerToken, tenantId);
+        if (def == null) {
+            throw new IllegalStateException("decisionCode '" + decisionCode
+                + "' not found (source=" + defSource + ")");
+        }
+        cache.put(decisionCode, def);
+        log.info("Cached decisiondef '{}' (rules={}, hitPolicy={})",
+            decisionCode, def.rules().size(), def.hitPolicy());
+        return def;
+    }
+
+    public void invalidate(String decisionCode) { cache.invalidate(decisionCode); }
+    public long cacheSize() { return cache.estimatedSize(); }
+
+    public String getSource() { return defSource; }
+
+    /** F5 — conmuta la fuente en runtime e invalida el cache. */
+    public void setSource(String source) {
+        this.defSource = source;
+        cache.invalidateAll();
+        log.info("DecisionDefinitionLoader source → {} (cache invalidado)", source);
+    }
+
+    /** Fetch HTTP a system (path legacy extraído de load()). Sin cache — para compare/legacy. */
+    public DecisionDefinition fetchFromSystem(String decisionCode, String bearerToken, UUID tenantId) {
         final String svcToken = tenantId != null
             ? serviceTokenProvider.tokenForTenant(tenantId)
             : serviceTokenProvider.currentToken();
@@ -101,16 +129,8 @@ public class DecisionDefinitionLoader {
             throw new IllegalStateException("system returned error for decisionCode '" + decisionCode
                 + "': " + (resp == null ? "no response" : resp.get("error")));
         }
-
-        DecisionDefinition def = parse(resp);
-        cache.put(decisionCode, def);
-        log.info("Cached decisiondef '{}' (rules={}, hitPolicy={})",
-            decisionCode, def.rules().size(), def.hitPolicy());
-        return def;
+        return parse(resp);
     }
-
-    public void invalidate(String decisionCode) { cache.invalidate(decisionCode); }
-    public long cacheSize() { return cache.estimatedSize(); }
 
     // ─────────────────────────────────────────────────────────────────────────
 

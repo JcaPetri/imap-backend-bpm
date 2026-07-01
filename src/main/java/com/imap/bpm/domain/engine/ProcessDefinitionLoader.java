@@ -69,6 +69,10 @@ public class ProcessDefinitionLoader {
     private final BpmServiceTokenProvider serviceTokenProvider;
     private final MessageStartSubscriptionRepository msgStartSubRepo;
     private final com.imap.eav.engine.context.EavTenantSession tenantSession;
+    private final LocalDefinitionReader localReader;
+
+    /** 'system' (HTTP a system, default/legacy) | 'local' (tablas relacionales bpm, F5). Toggle en runtime. */
+    private volatile String defSource;
 
     /**
      * Self-injection (lazy) para invocar syncMessageStartSubscriptions desde load()
@@ -85,12 +89,16 @@ public class ProcessDefinitionLoader {
                                    ObjectMapper jackson,
                                    BpmServiceTokenProvider serviceTokenProvider,
                                    MessageStartSubscriptionRepository msgStartSubRepo,
-                                   com.imap.eav.engine.context.EavTenantSession tenantSession) {
+                                   com.imap.eav.engine.context.EavTenantSession tenantSession,
+                                   LocalDefinitionReader localReader,
+                                   @Value("${bpm.defs.source:system}") String defSource) {
         this.http = WebClient.builder().baseUrl(systemBaseUrl).build();
         this.jackson = jackson;
         this.serviceTokenProvider = serviceTokenProvider;
         this.msgStartSubRepo = msgStartSubRepo;
         this.tenantSession = tenantSession;
+        this.localReader = localReader;
+        this.defSource = defSource;
         this.cache = Caffeine.newBuilder()
             .maximumSize(200)
             .expireAfterWrite(Duration.ofDays(365))   // efectivamente infinito
@@ -110,35 +118,15 @@ public class ProcessDefinitionLoader {
         log.info("ProcessDefinitionLoader cache MISS — fetching {} from system (tenantId={})",
             processVersionId, tenantId);
 
-        // S2S al system con SERVICE TOKEN (no el bearer del request original).
-        // El endpoint requiere system.admin que el service token siempre tiene.
-        // Fallback al bearer del request si service token disabled (legacy).
-        // tokenForTenant (no currentToken): el endpoint /v1/admin/bpm/** pasa por el
-        // TenantContextFilter de system que valida membership por X-Tenant-Id. currentToken()
-        // solo tiene SYSTEM_TENANT → el service account no es miembro del tenant del request
-        // → 403 en cache-miss (hoy enmascarado por el cache Caffeine). Mismo fix que listProcessdefs.
-        final String svcToken = tenantId != null
-            ? serviceTokenProvider.tokenForTenant(tenantId)
-            : serviceTokenProvider.currentToken();
-        final String effectiveBearer = svcToken != null
-            ? svcToken
-            : (bearerToken != null ? bearerToken : BearerTokenHolder.get());
-        Map<String, Object> resp = http.get()
-            .uri("/v1/admin/bpm/processversion/{id}/full", processVersionId.toString())
-            .headers(h -> {
-                if (effectiveBearer != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + effectiveBearer);
-                if (tenantId != null)    h.set("X-Tenant-Id", tenantId.toString());
-            })
-            .retrieve()
-            .bodyToMono(Map.class)
-            .block();
-
-        if (resp == null || resp.get("error") != null) {
-            throw new IllegalStateException("system returned error for processVersion " + processVersionId
-                + ": " + (resp == null ? "no response" : resp.get("error")));
+        // F5: fuente conmutable. 'local' = tablas relacionales bpm (LocalDefinitionReader);
+        // 'system' (default/legacy) = HTTP a system. Idéntico shape → el engine no cambia.
+        ProcessDefinition def = "local".equalsIgnoreCase(defSource)
+            ? localReader.loadProcessDefinition(processVersionId)
+            : fetchFromSystem(processVersionId, bearerToken, tenantId);
+        if (def == null) {
+            throw new IllegalStateException("processVersion " + processVersionId
+                + " not found (source=" + defSource + ")");
         }
-
-        ProcessDefinition def = parse(processVersionId, resp);
         cache.put(processVersionId, def);
         log.info("Cached processVersion {} ({} flowElements, {} sequenceFlows, {} taskForms)",
             processVersionId, def.flowElements().size(), def.sequenceFlows().size(), def.taskForms().size());
@@ -165,6 +153,45 @@ public class ProcessDefinitionLoader {
 
     /** Stats para debugging / metrics. */
     public long cacheSize() { return cache.estimatedSize(); }
+
+    /** F5 — fuente de defs vigente ('system'|'local'). */
+    public String getSource() { return defSource; }
+
+    /** F5 — conmuta la fuente en runtime e invalida el cache (para cutover/rollback reversible). */
+    public void setSource(String source) {
+        this.defSource = source;
+        cache.invalidateAll();
+        log.info("ProcessDefinitionLoader source → {} (cache invalidado)", source);
+    }
+
+    /**
+     * Fetch HTTP a system (path legacy, extraído de load()). Sin cache ni sync —
+     * úsalo para el cutover-compare (F5) o cuando defSource='system'.
+     * S2S con SERVICE TOKEN (system.admin) + tokenForTenant (membership por X-Tenant-Id).
+     */
+    public ProcessDefinition fetchFromSystem(UUID processVersionId, String bearerToken, UUID tenantId) {
+        final String svcToken = tenantId != null
+            ? serviceTokenProvider.tokenForTenant(tenantId)
+            : serviceTokenProvider.currentToken();
+        final String effectiveBearer = svcToken != null
+            ? svcToken
+            : (bearerToken != null ? bearerToken : BearerTokenHolder.get());
+        Map<String, Object> resp = http.get()
+            .uri("/v1/admin/bpm/processversion/{id}/full", processVersionId.toString())
+            .headers(h -> {
+                if (effectiveBearer != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + effectiveBearer);
+                if (tenantId != null)    h.set("X-Tenant-Id", tenantId.toString());
+            })
+            .retrieve()
+            .bodyToMono(Map.class)
+            .block();
+
+        if (resp == null || resp.get("error") != null) {
+            throw new IllegalStateException("system returned error for processVersion " + processVersionId
+                + ": " + (resp == null ? "no response" : resp.get("error")));
+        }
+        return parse(processVersionId, resp);
+    }
 
     /**
      * WorkHub — catálogo de processdefs del tenant (para "startable processes").
