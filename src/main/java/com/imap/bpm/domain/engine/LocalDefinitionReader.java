@@ -43,6 +43,9 @@ import java.util.stream.Collectors;
 @Component
 public class LocalDefinitionReader {
 
+    /** Defs de plataforma. Un decisiondef SYSTEM_TENANT sirve a todos los tenants (como en system). */
+    private static final UUID SYSTEM_TENANT = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
     private final ProcessdefRepository processdefRepo;
     private final ProcessversionRepository processversionRepo;
     private final FlowelementRepository flowelementRepo;
@@ -118,7 +121,12 @@ public class LocalDefinitionReader {
 
     /** Construye la DecisionDefinition por code dentro de un tenant, o null. */
     public DecisionDefinition loadDecisionDefinition(UUID tenantId, String code) {
-        Decisiondef dd = decisiondefRepo.findByTenantIdAndCode(tenantId, code).orElse(null);
+        // Resuelve por code: el decisiondef del tenant si existe, si no el de plataforma
+        // (SYSTEM_TENANT). El filtro tenant_id del query no basta con solo la RLS: hay que
+        // pedir explícitamente SYSTEM_TENANT (los 7 decisiondefs son de plataforma).
+        Decisiondef dd = decisiondefRepo.findByTenantIdAndCode(tenantId, code)
+            .or(() -> decisiondefRepo.findByTenantIdAndCode(SYSTEM_TENANT, code))
+            .orElse(null);
         if (dd == null) return null;
 
         List<DecisionDefinition.Rule> rules = new ArrayList<>();
