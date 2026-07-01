@@ -529,8 +529,10 @@ public class ProcessdefManagementService {
             for (Taskform tf : taskformRepository.findByFlowelementIdIn(feIds)) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("flowElementCode", codeById.get(tf.getFlowelementId()));
-                // entityDefCode vive en system (cross-service); local solo tenemos el id.
+                // entityDefId es la FK local; entityDefCode se resuelve s2s (el builder trabaja por code).
                 m.put("entityDefId", tf.getEntitydefId() == null ? null : tf.getEntitydefId().toString());
+                m.put("entityDefCode", tf.getEntitydefId() == null ? null
+                    : systemEntityResolver.resolveCode(tf.getEntitydefId()));
                 m.put("mode", tf.getMode());
                 taskForms.add(m);
             }
@@ -577,9 +579,10 @@ public class ProcessdefManagementService {
             m.put("publishedAt", v.getPublishedAt());
             m.put("isLocked", v.isLocked());
             m.put("isCurrent", currentVerId != null && currentVerId.equals(v.getId()));
-            m.put("activeInstances",
+            // Contrato del frontend (ProcessdefVersionSummary): instancesActive/instancesTotal.
+            m.put("instancesActive",
                 processInstanceRepository.countByProcessversionIdAndLifecycle(v.getId(), "active"));
-            m.put("totalInstances",
+            m.put("instancesTotal",
                 processInstanceRepository.countByProcessversionId(v.getId()));
             out.add(m);
         }

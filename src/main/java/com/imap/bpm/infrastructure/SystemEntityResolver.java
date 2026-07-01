@@ -25,6 +25,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,9 +51,12 @@ public class SystemEntityResolver {
 
     private static final Logger log = LoggerFactory.getLogger(SystemEntityResolver.class);
 
+    private static final UUID SYSTEM_TENANT = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
     private final WebClient http;
     private final BpmServiceTokenProvider serviceTokenProvider;
     private final ConcurrentHashMap<String, UUID> cache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<UUID, String> codeById = new ConcurrentHashMap<>();
 
     public SystemEntityResolver(@Value("${imap.system.base-url:http://localhost:8092/imap/system}")
                                 String systemBaseUrl,
@@ -104,6 +108,51 @@ public class SystemEntityResolver {
             return null;
         }
         cache.put(entityCode, id);
+        codeById.put(id, entityCode);
         return id;
+    }
+
+    /**
+     * Reverse: entityDefId → code (para getDetail — el frontend/builder trabaja por code).
+     * Carga el catálogo completo de entity_defs una vez (GET /v1/entities) y lo cachea
+     * en ambas direcciones. null si no se puede resolver.
+     */
+    @SuppressWarnings("unchecked")
+    public String resolveCode(UUID id) {
+        if (id == null) return null;
+        String c = codeById.get(id);
+        if (c != null) return c;
+        loadCatalog();
+        return codeById.get(id);
+    }
+
+    private synchronized void loadCatalog() {
+        if (!codeById.isEmpty()) return;
+        final String svcToken = serviceTokenProvider.tokenForTenant(SYSTEM_TENANT);
+        final String bearer = svcToken != null ? svcToken : BearerTokenHolder.get();
+        try {
+            List<Map<String, Object>> list = http.get()
+                .uri("/v1/entities")
+                .headers(h -> {
+                    if (bearer != null) h.set(HttpHeaders.AUTHORIZATION, "Bearer " + bearer);
+                    h.set("X-Tenant-Id", SYSTEM_TENANT.toString());
+                })
+                .retrieve()
+                .bodyToMono(List.class)
+                .block();
+            if (list != null) {
+                for (Map<String, Object> e : list) {
+                    Object idO = e.get("id"), codeO = e.get("code");
+                    if (idO == null || codeO == null) continue;
+                    try {
+                        UUID eid = UUID.fromString(idO.toString());
+                        codeById.put(eid, codeO.toString());
+                        cache.put(codeO.toString(), eid);
+                    } catch (IllegalArgumentException ignore) { /* id no-uuid */ }
+                }
+            }
+        } catch (Exception ex) {
+            log.warn("SystemEntityResolver.loadCatalog fallo: {}", ex.toString());
+        }
     }
 }
