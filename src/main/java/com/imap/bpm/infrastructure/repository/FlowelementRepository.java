@@ -30,5 +30,5 @@ public interface FlowelementRepository extends JpaRepository<Flowelement, UUID> 
      *  diferido y Hibernate ordena INSERTS antes que DELETES en el flush → colisión uq. */
     @org.springframework.data.jpa.repository.Modifying
     @org.springframework.data.jpa.repository.Query("delete from Flowelement f where f.processversionId = ?1")
-    long deleteByProcessversionId(UUID processversionId);
+    int deleteByProcessversionId(UUID processversionId);
 }

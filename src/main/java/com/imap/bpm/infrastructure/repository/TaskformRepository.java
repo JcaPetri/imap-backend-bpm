@@ -28,5 +28,5 @@ public interface TaskformRepository extends JpaRepository<Taskform, UUID> {
     /** F4-mgmt update: borra los taskforms colgados de esos flowelements (bulk inmediato). */
     @org.springframework.data.jpa.repository.Modifying
     @org.springframework.data.jpa.repository.Query("delete from Taskform t where t.flowelementId in ?1")
-    long deleteByFlowelementIdIn(List<UUID> flowelementIds);
+    int deleteByFlowelementIdIn(List<UUID> flowelementIds);
 }
