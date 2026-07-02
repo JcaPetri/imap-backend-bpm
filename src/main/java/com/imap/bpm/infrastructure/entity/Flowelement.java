@@ -61,19 +61,19 @@ public class Flowelement {
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
 
-    @Column(name = "created_at", nullable = false)
+    @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
     @Column(name = "updated_at", nullable = false)
     private OffsetDateTime updatedAt;
 
-    @Column(name = "created_by_id")
+    @Column(name = "created_by_id", updatable = false)
     private UUID createdById;
 
     @Column(name = "updated_by_id")
     private UUID updatedById;
 
-    @Column(name = "owned_by_id")
+    @Column(name = "owned_by_id", updatable = false)
     private UUID ownedById;
 
     public UUID getId() { return id; }
