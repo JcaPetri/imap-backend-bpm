@@ -99,6 +99,7 @@ public class BpmProcessController {
     private final BpmInboxEventRepository inboxRepo;
     private final ScoreService scoreService;
     private final SseEventBus sseEventBus;
+    private final com.imap.bpm.application.ProcessdefManagementService processdefMgmt;
 
     @PersistenceContext
     private EntityManager em;
@@ -115,7 +116,8 @@ public class BpmProcessController {
                                 MessageCorrelationRepository msgCorrRepo,
                                 BpmInboxEventRepository inboxRepo,
                                 ScoreService scoreService,
-                                SseEventBus sseEventBus) {
+                                SseEventBus sseEventBus,
+                                com.imap.bpm.application.ProcessdefManagementService processdefMgmt) {
         this.engine = engine;
         this.taskRepo = taskRepo;
         this.instanceRepo = instanceRepo;
@@ -129,6 +131,7 @@ public class BpmProcessController {
         this.inboxRepo = inboxRepo;
         this.scoreService = scoreService;
         this.sseEventBus = sseEventBus;
+        this.processdefMgmt = processdefMgmt;
     }
 
     @PostMapping("/process/{versionId}/start")
@@ -310,16 +313,13 @@ public class BpmProcessController {
         List<String> perms = permsByTenant == null ? List.of()
             : permsByTenant.getOrDefault(tenantId == null ? "" : tenantId.toString(), List.of());
 
-        // Degradación con gracia: si el catálogo de system no se puede leer
-        // (ej. el service token no está autorizado para /v1/admin/bpm/processdef →
-        // 403, fix de auth pendiente en el sprint de start_permission/permisos),
-        // devolvemos lista vacía en vez de 500 — la bandeja no debe romperse.
+        // Catálogo de processdefs LOCAL (post-cutover: tablas relacionales bpm, no HTTP a system).
+        // Degradación con gracia: si algo falla, lista vacía en vez de 500 — la bandeja no debe romperse.
         List<Map<String, Object>> defs;
         try {
-            defs = loader.listProcessdefs(tenantId);
+            defs = processdefMgmt.listAll(tenantId);
         } catch (Exception e) {
-            log.warn("startable: no se pudo listar processdefs desde system ({}). Devuelvo []. "
-                + "Pendiente: autorizar el catálogo startable sin system.admin.", e.toString());
+            log.warn("startable: no se pudo listar processdefs local ({}). Devuelvo [].", e.toString());
             return List.of();
         }
 
