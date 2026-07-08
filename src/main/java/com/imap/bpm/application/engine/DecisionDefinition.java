@@ -14,7 +14,7 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.engine;
+package com.imap.bpm.application.engine;
 
 import java.util.List;
 import java.util.UUID;

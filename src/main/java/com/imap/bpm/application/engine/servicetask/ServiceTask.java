@@ -14,7 +14,7 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.engine.servicetask;
+package com.imap.bpm.application.engine.servicetask;
 
 import org.springframework.stereotype.Component;
 

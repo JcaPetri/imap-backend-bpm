@@ -14,12 +14,12 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.engine.servicetask.handlers;
+package com.imap.bpm.application.engine.servicetask.handlers;
 
-import com.imap.bpm.domain.engine.servicetask.ServiceTask;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskContext;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskHandler;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskResult;
+import com.imap.bpm.application.engine.servicetask.ServiceTask;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskContext;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskHandler;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskResult;
 
 /**
  * Test handler: always fails with errorCode='TEST_FAILURE'.

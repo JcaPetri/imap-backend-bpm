@@ -17,7 +17,7 @@
 
 package com.imap.bpm.infrastructure;
 
-import com.imap.bpm.domain.workhub.WorkHubConfigService;
+import com.imap.bpm.application.workhub.WorkHubConfigService;
 import com.imap.bpm.infrastructure.entity.WhbClassification;
 import com.imap.bpm.infrastructure.entity.WhbTenantConfig;
 import com.imap.eav.engine.context.EavTenantSession;

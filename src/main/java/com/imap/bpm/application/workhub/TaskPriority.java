@@ -14,17 +14,15 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.workhub;
+package com.imap.bpm.application.workhub;
 
 /**
- * Banda de color del semáforo del WorkHub. Orden ascendente de severidad
- * (GREEN &lt; YELLOW &lt; RED) para poder combinar dos señales con max().
+ * Resultado del cálculo de prioridad de una tarea para la bandeja del WorkHub.
+ *
+ * @param prioridadPct  score normalizado a % del máximo (0–100). 0 si la tarea
+ *                      no tiene clasificación.
+ * @param color         banda del semáforo (combina prioridad% con estado de SLA).
+ * @param classified    true si el processdef/user_task tiene clasificación G/U/T
+ *                      cargada; false si el % proviene solo del default (0).
  */
-public enum SemaphoreColor {
-    GREEN, YELLOW, RED;
-
-    /** Devuelve la más severa de las dos. */
-    public SemaphoreColor max(SemaphoreColor other) {
-        return this.ordinal() >= other.ordinal() ? this : other;
-    }
-}
+public record TaskPriority(double prioridadPct, SemaphoreColor color, boolean classified) {}

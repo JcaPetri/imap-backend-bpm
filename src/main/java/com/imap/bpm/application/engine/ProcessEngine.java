@@ -14,7 +14,7 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.engine;
+package com.imap.bpm.application.engine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.infrastructure.entity.*;
@@ -100,9 +100,9 @@ public class ProcessEngine {
     private final ObjectMapper jackson;
     private final JexlEngine jexl;
     private final com.imap.bpm.infrastructure.sse.SseEventBus sseBus;
-    private final com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
+    private final com.imap.bpm.application.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
     private final com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo;
-    private final com.imap.bpm.domain.service.TaskAssignmentService taskAssignmentService;
+    private final com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService;
 
     /**
      * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
@@ -130,9 +130,9 @@ public class ProcessEngine {
                          MeterRegistry meterRegistry,
                          ObjectMapper jackson,
                          com.imap.bpm.infrastructure.sse.SseEventBus sseBus,
-                         com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner serviceTaskRunner,
+                         com.imap.bpm.application.engine.servicetask.ServiceTaskRunner serviceTaskRunner,
                          com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo,
-                         com.imap.bpm.domain.service.TaskAssignmentService taskAssignmentService) {
+                         com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -546,7 +546,7 @@ public class ProcessEngine {
     // ─── service_task (Fase 0.B.1 — ServiceTaskRegistry) ───────────────────
 
     /**
-     * Dispatcha el service_task al handler correspondiente vía {@link com.imap.bpm.domain.engine.servicetask.ServiceTaskRunner}.
+     * Dispatcha el service_task al handler correspondiente vía {@link com.imap.bpm.application.engine.servicetask.ServiceTaskRunner}.
      *
      * Lookup chain en el Registry:
      *   1. Local handler (@ServiceTask annotation en el classpath del BPM)
@@ -568,19 +568,19 @@ public class ProcessEngine {
         // Bearer token para que remote handlers puedan hacer s2s en cascade
         String bearerToken = com.imap.platform.security.BearerTokenHolder.get();
 
-        com.imap.bpm.domain.engine.servicetask.ServiceTaskContext ctx =
-            new com.imap.bpm.domain.engine.servicetask.ServiceTaskContext(
+        com.imap.bpm.application.engine.servicetask.ServiceTaskContext ctx =
+            new com.imap.bpm.application.engine.servicetask.ServiceTaskContext(
                 serviceCode, current, instance, token, userId, bearerToken, vars);
 
         audit(instance, "service_task.invoked", current.id(), token.getId(), userId,
             Map.of("elementCode", current.code(), "serviceCode", serviceCode == null ? "(none)" : serviceCode));
 
-        com.imap.bpm.domain.engine.servicetask.ServiceTaskResult result;
+        com.imap.bpm.application.engine.servicetask.ServiceTaskResult result;
         try {
             result = serviceTaskRunner.runWithRetry(ctx);
         } catch (Exception e) {
             log.error("ServiceTaskRunner threw unexpected exception for serviceCode='{}'", serviceCode, e);
-            result = com.imap.bpm.domain.engine.servicetask.ServiceTaskResult.fail(
+            result = com.imap.bpm.application.engine.servicetask.ServiceTaskResult.fail(
                 "RUNNER_EXCEPTION", e.getClass().getSimpleName() + ": " + e.getMessage());
         }
 

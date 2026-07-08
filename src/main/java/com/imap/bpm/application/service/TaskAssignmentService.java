@@ -14,11 +14,11 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.service;
+package com.imap.bpm.application.service;
 
-import com.imap.bpm.domain.engine.DecisionDefinition;
-import com.imap.bpm.domain.engine.DecisionDefinitionLoader;
-import com.imap.bpm.domain.engine.DmnEvaluator;
+import com.imap.bpm.application.engine.DecisionDefinition;
+import com.imap.bpm.application.engine.DecisionDefinitionLoader;
+import com.imap.bpm.application.engine.DmnEvaluator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;

@@ -14,9 +14,9 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.domain.engine.servicetask;
+package com.imap.bpm.application.engine.servicetask;
 
-import com.imap.bpm.domain.engine.ProcessDefinition;
+import com.imap.bpm.application.engine.ProcessDefinition;
 import com.imap.bpm.infrastructure.entity.ProcessInstance;
 import com.imap.bpm.infrastructure.entity.Token;
 

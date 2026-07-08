@@ -17,9 +17,9 @@
 
 package com.imap.bpm.infrastructure;
 
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskContext;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskRegistry;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskResult;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskContext;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskRegistry;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;

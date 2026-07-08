@@ -17,11 +17,11 @@
 
 package com.imap.bpm.infrastructure;
 
-import com.imap.bpm.domain.engine.ProcessDefinition;
-import com.imap.bpm.domain.engine.ProcessDefinitionLoader;
-import com.imap.bpm.domain.engine.ProcessEngine;
-import com.imap.bpm.domain.workhub.ScoreService;
-import com.imap.bpm.domain.workhub.TaskPriority;
+import com.imap.bpm.application.engine.ProcessDefinition;
+import com.imap.bpm.application.engine.ProcessDefinitionLoader;
+import com.imap.bpm.application.engine.ProcessEngine;
+import com.imap.bpm.application.workhub.ScoreService;
+import com.imap.bpm.application.workhub.TaskPriority;
 import com.imap.bpm.infrastructure.sse.SseEventBus;
 import com.imap.bpm.infrastructure.entity.AuditLog;
 import com.imap.bpm.infrastructure.entity.ProcessInstance;
