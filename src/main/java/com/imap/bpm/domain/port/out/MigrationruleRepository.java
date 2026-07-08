@@ -14,16 +14,19 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.infrastructure.repository;
+package com.imap.bpm.domain.port.out;
 
-import com.imap.bpm.infrastructure.entity.MigrationplanEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
+import com.imap.bpm.domain.model.Migrationrule;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
-public interface MigrationplanRepository extends JpaRepository<MigrationplanEntity, UUID> {
-    List<MigrationplanEntity> findByTenantIdOrderByCreatedAtDesc(UUID tenantId);
-    Optional<MigrationplanEntity> findByTenantIdAndCode(UUID tenantId, String code);
+/** Puerto de salida: migration rules (V015). Devuelve dominio. */
+public interface MigrationruleRepository {
+
+    List<Migrationrule> findByMigrationplanIdOrderBySortOrder(UUID migrationplanId);
+
+    int deleteByMigrationplanId(UUID migrationplanId);
+
+    Migrationrule save(Migrationrule rule);
 }

@@ -14,22 +14,22 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.infrastructure.repository;
+package com.imap.bpm.domain.port.out;
 
-import com.imap.bpm.infrastructure.entity.MigrationruleEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
+import com.imap.bpm.domain.model.Migrationplan;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
-public interface MigrationruleRepository extends JpaRepository<MigrationruleEntity, UUID> {
-    List<MigrationruleEntity> findByMigrationplanIdOrderBySortOrder(UUID migrationplanId);
+/** Puerto de salida: migration plans (V015). Devuelve dominio. */
+public interface MigrationplanRepository {
 
-    /** F4-mgmt updateRules: borra las rules del plan antes de recrearlas.
-     *  Bulk @Modifying (ejecución inmediata, devuelve int — NO long, Spring Data lo rechaza)
-     *  — un deleteBy derivado es find-then-remove diferido y Hibernate ordena INSERTS antes
-     *  que DELETES en el flush → colisión de unique key al recrear. */
-    @org.springframework.data.jpa.repository.Modifying
-    @org.springframework.data.jpa.repository.Query("delete from MigrationruleEntity r where r.migrationplanId = ?1")
-    int deleteByMigrationplanId(UUID migrationplanId);
+    List<Migrationplan> findByTenantIdOrderByCreatedAtDesc(UUID tenantId);
+
+    Optional<Migrationplan> findByTenantIdAndCode(UUID tenantId, String code);
+
+    Optional<Migrationplan> findById(UUID id);
+
+    Migrationplan save(Migrationplan plan);
 }
