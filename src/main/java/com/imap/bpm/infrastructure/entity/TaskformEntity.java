@@ -17,19 +17,17 @@
 package com.imap.bpm.infrastructure.entity;
 
 import jakarta.persistence.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_migrationplan_tbl (V015). Plan de migración de
- * instancias entre dos processversions.
+ * JPA entity para bpm.bpm_hum_taskform_tbl (V015).
+ * Form de un user_task; entitydef_id = FK lógica cross-service a system.sys_entity_def.
  */
 @Entity
-@Table(name = "bpm_pro_migrationplan_tbl")
-public class Migrationplan {
+@Table(name = "bpm_hum_taskform_tbl")
+public class TaskformEntity {
 
     @Id
     @Column(name = "id")
@@ -38,30 +36,14 @@ public class Migrationplan {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
-    @Column(name = "code", nullable = false)
-    private String code;
+    @Column(name = "flowelement_id", nullable = false)
+    private UUID flowelementId;
 
-    @Column(name = "description")
-    private String description;
+    @Column(name = "entitydef_id")
+    private UUID entitydefId;
 
-    @Column(name = "source_processversion_id", nullable = false)
-    private UUID sourceProcessversionId;
-
-    @Column(name = "target_processversion_id", nullable = false)
-    private UUID targetProcessversionId;
-
-    @Column(name = "status", nullable = false, length = 20)
-    private String status;
-
-    @Column(name = "applied_at")
-    private OffsetDateTime appliedAt;
-
-    @Column(name = "applied_by")
-    private UUID appliedBy;
-
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "stats")
-    private String stats;
+    @Column(name = "mode", length = 20)
+    private String mode;
 
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
@@ -85,22 +67,12 @@ public class Migrationplan {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
-    public String getCode() { return code; }
-    public void setCode(String code) { this.code = code; }
-    public String getDescription() { return description; }
-    public void setDescription(String description) { this.description = description; }
-    public UUID getSourceProcessversionId() { return sourceProcessversionId; }
-    public void setSourceProcessversionId(UUID sourceProcessversionId) { this.sourceProcessversionId = sourceProcessversionId; }
-    public UUID getTargetProcessversionId() { return targetProcessversionId; }
-    public void setTargetProcessversionId(UUID targetProcessversionId) { this.targetProcessversionId = targetProcessversionId; }
-    public String getStatus() { return status; }
-    public void setStatus(String status) { this.status = status; }
-    public OffsetDateTime getAppliedAt() { return appliedAt; }
-    public void setAppliedAt(OffsetDateTime appliedAt) { this.appliedAt = appliedAt; }
-    public UUID getAppliedBy() { return appliedBy; }
-    public void setAppliedBy(UUID appliedBy) { this.appliedBy = appliedBy; }
-    public String getStats() { return stats; }
-    public void setStats(String stats) { this.stats = stats; }
+    public UUID getFlowelementId() { return flowelementId; }
+    public void setFlowelementId(UUID flowelementId) { this.flowelementId = flowelementId; }
+    public UUID getEntitydefId() { return entitydefId; }
+    public void setEntitydefId(UUID entitydefId) { this.entitydefId = entitydefId; }
+    public String getMode() { return mode; }
+    public void setMode(String mode) { this.mode = mode; }
     public UUID getStateId() { return stateId; }
     public void setStateId(UUID stateId) { this.stateId = stateId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }

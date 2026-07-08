@@ -22,12 +22,16 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_hum_taskform_tbl (V015).
- * Form de un user_task; entitydef_id = FK lógica cross-service a system.sys_entity_def.
+ * JPA entity para bpm.bpm_pro_processdef_tbl (V015).
+ *
+ * Cabecera de una definición de proceso. Migrada del cell-store EAV de system
+ * a tabla relacional en bpm (ver IMAP_BPM_OWNERSHIP_MIGRATION.md).
+ * currentversion_id = puntero lógico a la version vigente (sin FK física por
+ * circularidad con processversion).
  */
 @Entity
-@Table(name = "bpm_hum_taskform_tbl")
-public class Taskform {
+@Table(name = "bpm_pro_processdef_tbl")
+public class ProcessdefEntity {
 
     @Id
     @Column(name = "id")
@@ -36,14 +40,23 @@ public class Taskform {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
-    @Column(name = "flowelement_id", nullable = false)
-    private UUID flowelementId;
+    @Column(name = "code", nullable = false)
+    private String code;
 
-    @Column(name = "entitydef_id")
-    private UUID entitydefId;
+    @Column(name = "name", nullable = false)
+    private String name;
 
-    @Column(name = "mode", length = 20)
-    private String mode;
+    @Column(name = "description")
+    private String description;
+
+    @Column(name = "currentversion_id")
+    private UUID currentversionId;
+
+    @Column(name = "lifecycle", nullable = false, length = 20)
+    private String lifecycle;       // 'active' | 'inactive'
+
+    @Column(name = "start_permission")
+    private String startPermission;
 
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
@@ -67,12 +80,18 @@ public class Taskform {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
-    public UUID getFlowelementId() { return flowelementId; }
-    public void setFlowelementId(UUID flowelementId) { this.flowelementId = flowelementId; }
-    public UUID getEntitydefId() { return entitydefId; }
-    public void setEntitydefId(UUID entitydefId) { this.entitydefId = entitydefId; }
-    public String getMode() { return mode; }
-    public void setMode(String mode) { this.mode = mode; }
+    public String getCode() { return code; }
+    public void setCode(String code) { this.code = code; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+    public UUID getCurrentversionId() { return currentversionId; }
+    public void setCurrentversionId(UUID currentversionId) { this.currentversionId = currentversionId; }
+    public String getLifecycle() { return lifecycle; }
+    public void setLifecycle(String lifecycle) { this.lifecycle = lifecycle; }
+    public String getStartPermission() { return startPermission; }
+    public void setStartPermission(String startPermission) { this.startPermission = startPermission; }
     public UUID getStateId() { return stateId; }
     public void setStateId(UUID stateId) { this.stateId = stateId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }

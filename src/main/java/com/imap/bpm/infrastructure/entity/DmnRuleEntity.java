@@ -24,12 +24,11 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_processversion_tbl (V015).
- * Version de un processdef; `definition` = snapshot JSONB consolidado.
+ * JPA entity para bpm.bpm_dmn_rule_tbl (V015). Fila de una tabla DMN (por priority).
  */
 @Entity
-@Table(name = "bpm_pro_processversion_tbl")
-public class Processversion {
+@Table(name = "bpm_dmn_rule_tbl")
+public class DmnRuleEntity {
 
     @Id
     @Column(name = "id")
@@ -38,21 +37,19 @@ public class Processversion {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
-    @Column(name = "processdef_id", nullable = false)
-    private UUID processdefId;
+    @Column(name = "decisiondef_id", nullable = false)
+    private UUID decisiondefId;
 
-    @Column(name = "version", nullable = false)
-    private Integer version;
-
-    @Column(name = "published_at")
-    private OffsetDateTime publishedAt;
+    @Column(name = "priority", nullable = false)
+    private Integer priority;
 
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "definition")
-    private String definition;
+    @Column(name = "inputs")
+    private String inputs;
 
-    @Column(name = "is_locked", nullable = false)
-    private boolean locked;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "outputs")
+    private String outputs;
 
     @Column(name = "description")
     private String description;
@@ -79,16 +76,14 @@ public class Processversion {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
-    public UUID getProcessdefId() { return processdefId; }
-    public void setProcessdefId(UUID processdefId) { this.processdefId = processdefId; }
-    public Integer getVersion() { return version; }
-    public void setVersion(Integer version) { this.version = version; }
-    public OffsetDateTime getPublishedAt() { return publishedAt; }
-    public void setPublishedAt(OffsetDateTime publishedAt) { this.publishedAt = publishedAt; }
-    public String getDefinition() { return definition; }
-    public void setDefinition(String definition) { this.definition = definition; }
-    public boolean isLocked() { return locked; }
-    public void setLocked(boolean locked) { this.locked = locked; }
+    public UUID getDecisiondefId() { return decisiondefId; }
+    public void setDecisiondefId(UUID decisiondefId) { this.decisiondefId = decisiondefId; }
+    public Integer getPriority() { return priority; }
+    public void setPriority(Integer priority) { this.priority = priority; }
+    public String getInputs() { return inputs; }
+    public void setInputs(String inputs) { this.inputs = inputs; }
+    public String getOutputs() { return outputs; }
+    public void setOutputs(String outputs) { this.outputs = outputs; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
     public UUID getStateId() { return stateId; }

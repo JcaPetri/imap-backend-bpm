@@ -17,18 +17,17 @@
 package com.imap.bpm.infrastructure.entity;
 
 import jakarta.persistence.*;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_dmn_decisiondef_tbl (V015). Cabecera de una tabla DMN.
+ * JPA entity para bpm.bpm_pro_sequenceflow_tbl (V015).
+ * Arista del grafo: source_id → target_id (ambos FK a flowelement, intra-schema).
  */
 @Entity
-@Table(name = "bpm_dmn_decisiondef_tbl")
-public class Decisiondef {
+@Table(name = "bpm_pro_sequenceflow_tbl")
+public class SequenceflowEntity {
 
     @Id
     @Column(name = "id")
@@ -37,25 +36,23 @@ public class Decisiondef {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
-    @Column(name = "code", nullable = false)
-    private String code;
+    @Column(name = "processversion_id", nullable = false)
+    private UUID processversionId;
 
-    @Column(name = "name", nullable = false)
-    private String name;
+    @Column(name = "source_id", nullable = false)
+    private UUID sourceId;
+
+    @Column(name = "target_id", nullable = false)
+    private UUID targetId;
+
+    @Column(name = "condition_expr")
+    private String conditionExpr;
+
+    @Column(name = "sort_order")
+    private Integer sortOrder;
 
     @Column(name = "description")
     private String description;
-
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "input_schema")
-    private String inputSchema;
-
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "output_schema")
-    private String outputSchema;
-
-    @Column(name = "hit_policy", length = 20)
-    private String hitPolicy;
 
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
@@ -79,18 +76,18 @@ public class Decisiondef {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
-    public String getCode() { return code; }
-    public void setCode(String code) { this.code = code; }
-    public String getName() { return name; }
-    public void setName(String name) { this.name = name; }
+    public UUID getProcessversionId() { return processversionId; }
+    public void setProcessversionId(UUID processversionId) { this.processversionId = processversionId; }
+    public UUID getSourceId() { return sourceId; }
+    public void setSourceId(UUID sourceId) { this.sourceId = sourceId; }
+    public UUID getTargetId() { return targetId; }
+    public void setTargetId(UUID targetId) { this.targetId = targetId; }
+    public String getConditionExpr() { return conditionExpr; }
+    public void setConditionExpr(String conditionExpr) { this.conditionExpr = conditionExpr; }
+    public Integer getSortOrder() { return sortOrder; }
+    public void setSortOrder(Integer sortOrder) { this.sortOrder = sortOrder; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
-    public String getInputSchema() { return inputSchema; }
-    public void setInputSchema(String inputSchema) { this.inputSchema = inputSchema; }
-    public String getOutputSchema() { return outputSchema; }
-    public void setOutputSchema(String outputSchema) { this.outputSchema = outputSchema; }
-    public String getHitPolicy() { return hitPolicy; }
-    public void setHitPolicy(String hitPolicy) { this.hitPolicy = hitPolicy; }
     public UUID getStateId() { return stateId; }
     public void setStateId(UUID stateId) { this.stateId = stateId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }

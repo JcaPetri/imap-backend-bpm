@@ -17,8 +17,8 @@
 package com.imap.bpm.application.engine.servicetask;
 
 import com.imap.bpm.application.engine.ProcessDefinition;
-import com.imap.bpm.infrastructure.entity.ProcessInstance;
-import com.imap.bpm.infrastructure.entity.Token;
+import com.imap.bpm.infrastructure.entity.ProcessInstanceEntity;
+import com.imap.bpm.infrastructure.entity.TokenEntity;
 
 import java.util.Map;
 import java.util.UUID;
@@ -29,8 +29,8 @@ import java.util.UUID;
  * Contiene todo lo que el handler puede necesitar:
  *   - serviceCode: cuál task se está ejecutando (un mismo handler puede atender N codes si lo registra dinámico)
  *   - flowElement: configuración del task del processdef (campos custom en flowElement.config)
- *   - instance: la ProcessInstance corriendo
- *   - token: el Token activo en este elemento
+ *   - instance: la ProcessInstanceEntity corriendo
+ *   - token: el TokenEntity activo en este elemento
  *   - userId: usuario que disparó (puede ser null si es un timer / event)
  *   - bearerToken: JWT del usuario, para s2s remote calls (puede ser null)
  *   - variables: snapshot de las processinstance.variables al momento del invoke
@@ -41,8 +41,8 @@ import java.util.UUID;
 public record ServiceTaskContext(
     String serviceCode,
     ProcessDefinition.FlowElement flowElement,
-    ProcessInstance instance,
-    Token token,
+    ProcessInstanceEntity instance,
+    TokenEntity token,
     UUID userId,
     String bearerToken,
     Map<String, Object> variables

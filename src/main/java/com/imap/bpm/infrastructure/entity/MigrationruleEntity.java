@@ -27,7 +27,7 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "bpm_pro_migrationrule_tbl")
-public class Migrationrule {
+public class MigrationruleEntity {
 
     @Id
     @Column(name = "id")

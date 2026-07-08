@@ -16,14 +16,14 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.Processdef;
+import com.imap.bpm.infrastructure.entity.ProcessdefEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface ProcessdefRepository extends JpaRepository<Processdef, UUID> {
-    Optional<Processdef> findByTenantIdAndCode(UUID tenantId, String code);
-    List<Processdef> findByTenantIdOrderByCode(UUID tenantId);
+public interface ProcessdefRepository extends JpaRepository<ProcessdefEntity, UUID> {
+    Optional<ProcessdefEntity> findByTenantIdAndCode(UUID tenantId, String code);
+    List<ProcessdefEntity> findByTenantIdOrderByCode(UUID tenantId);
 }

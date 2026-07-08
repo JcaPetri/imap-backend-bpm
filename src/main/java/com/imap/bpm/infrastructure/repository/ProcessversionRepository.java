@@ -16,14 +16,14 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.Processversion;
+import com.imap.bpm.infrastructure.entity.ProcessversionEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface ProcessversionRepository extends JpaRepository<Processversion, UUID> {
-    List<Processversion> findByProcessdefIdOrderByVersionDesc(UUID processdefId);
-    Optional<Processversion> findByTenantIdAndProcessdefIdAndVersion(UUID tenantId, UUID processdefId, Integer version);
+public interface ProcessversionRepository extends JpaRepository<ProcessversionEntity, UUID> {
+    List<ProcessversionEntity> findByProcessdefIdOrderByVersionDesc(UUID processdefId);
+    Optional<ProcessversionEntity> findByTenantIdAndProcessdefIdAndVersion(UUID tenantId, UUID processdefId, Integer version);
 }

@@ -16,7 +16,7 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.WhbClassification;
+import com.imap.bpm.infrastructure.entity.WhbClassificationEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
@@ -29,18 +29,18 @@ import java.util.UUID;
  * nivel current (processversion_id NULL; el snapshot por versión se difiere).
  * Filtro por tenant explícito (RLS de bpm inerte hasta el sprint RLS-bpm-wide).
  */
-public interface WhbClassificationRepository extends JpaRepository<WhbClassification, UUID> {
+public interface WhbClassificationRepository extends JpaRepository<WhbClassificationEntity, UUID> {
 
     /** Clasificación a nivel processdef (current, sin versión, sin user_task). */
-    Optional<WhbClassification>
+    Optional<WhbClassificationEntity>
         findByTenantIdAndProcessdefIdAndFlowelementIdIsNullAndProcessversionIdIsNull(
             UUID tenantId, UUID processdefId);
 
     /** Override a nivel user_task (current, sin versión). */
-    Optional<WhbClassification>
+    Optional<WhbClassificationEntity>
         findByTenantIdAndProcessdefIdAndFlowelementIdAndProcessversionIdIsNull(
             UUID tenantId, UUID processdefId, UUID flowelementId);
 
     /** Listado para la pantalla admin (current, sin versión) del tenant. */
-    List<WhbClassification> findByTenantIdAndProcessversionIdIsNull(UUID tenantId);
+    List<WhbClassificationEntity> findByTenantIdAndProcessversionIdIsNull(UUID tenantId);
 }

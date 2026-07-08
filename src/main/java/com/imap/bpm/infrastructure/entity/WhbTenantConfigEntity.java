@@ -29,7 +29,7 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "bpm_whb_tenantconfig_tbl")
-public class WhbTenantConfig {
+public class WhbTenantConfigEntity {
 
     @Id @Column(name = "id")                                  private UUID id;
     @Column(name = "tenant_id", nullable = false)            private UUID tenantId;
@@ -48,7 +48,7 @@ public class WhbTenantConfig {
     @Column(name = "updated_by_id")                          private UUID updatedById;
     @Column(name = "owned_by_id", updatable = false)                            private UUID ownedById;
 
-    public WhbTenantConfig() {}
+    public WhbTenantConfigEntity() {}
 
     public UUID getId()                          { return id; }
     public void setId(UUID id)                   { this.id = id; }

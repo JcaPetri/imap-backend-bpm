@@ -25,38 +25,35 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_messagecorrelation_tbl.
+ * JPA entity para bpm.bpm_pro_jobexecutor_tbl.
  *
- * Cada row representa un token waiting por:
- *   - un message dirigido (correlation_key específica, ej "order_12345")
- *   - un signal broadcast (correlation_key="__BROADCAST__")
+ * Un job es una tarea programada del motor (timer / retry / escalation /
+ * async_continuation). Worker @Scheduled lo polea cada N segundos y dispara
+ * la acción correspondiente cuando fire_at <= NOW().
  *
- * Cuando el motor recibe POST /v1/bpm/messages/correlate o /signals/broadcast,
- * busca rows matching y reactiva los tokens correspondientes.
- *
- * messagedef_id es un UUID determinístico generado por
- * `UUID.nameUUIDFromBytes("message:<code>")` o `"signal:<code>"`. Esto evita
- * un lookup vs system EAV para resolver el UUID del messagedef definition.
+ * MVP (A2): solo job_type='timer' soportado — habilita intermediate_event
+ * con timer. Retry/escalation/async_continuation se agregan después.
  */
 @Entity
-@Table(name = "bpm_pro_messagecorrelation_tbl")
-public class MessageCorrelation {
-
-    public static final String BROADCAST_KEY = "__BROADCAST__";
+@Table(name = "bpm_pro_jobexecutor_tbl")
+public class JobExecutorEntity {
 
     @Id @Column(name = "id")                                 private UUID id;
     @Column(name = "tenant_id", nullable = false)            private UUID tenantId;
     @Column(name = "processinstance_id", nullable = false)   private UUID processinstanceId;
     @Column(name = "token_id")                               private UUID tokenId;
-    @Column(name = "messagedef_id", nullable = false)        private UUID messagedefId;
-    @Column(name = "correlation_key", nullable = false, length = 255) private String correlationKey;
-    @Column(name = "lifecycle", nullable = false, length = 20) private String lifecycle;
-    @Column(name = "expires_at")                             private OffsetDateTime expiresAt;
-    @Column(name = "matched_at")                             private OffsetDateTime matchedAt;
+    @Column(name = "job_type", nullable = false, length = 30) private String jobType;
+    @Column(name = "fire_at", nullable = false)              private OffsetDateTime fireAt;
 
     @Type(JsonBinaryType.class)
-    @Column(name = "matched_payload_jsonb", columnDefinition = "jsonb")
-    private Map<String, Object> matchedPayload;
+    @Column(name = "config_jsonb", columnDefinition = "jsonb")
+    private Map<String, Object> config;
+
+    @Column(name = "lifecycle", nullable = false, length = 20) private String lifecycle;
+    @Column(name = "retries", nullable = false)              private Integer retries;
+    @Column(name = "max_retries", nullable = false)          private Integer maxRetries;
+    @Column(name = "last_error")                             private String lastError;
+    @Column(name = "fired_at")                               private OffsetDateTime firedAt;
 
     @Column(name = "state_id", nullable = false)             private UUID stateId;
     @Column(name = "created_at", nullable = false, updatable = false)           private OffsetDateTime createdAt;
@@ -65,21 +62,7 @@ public class MessageCorrelation {
     @Column(name = "updated_by_id")                          private UUID updatedById;
     @Column(name = "owned_by_id", updatable = false)                            private UUID ownedById;
 
-    public MessageCorrelation() {}
-
-    /**
-     * Genera el messagedef_id determinístico para un message code.
-     * Mismo input siempre devuelve mismo UUID; permite correlation sin
-     * persistir messagedef formales en MVP.
-     */
-    public static UUID messageRefId(String messageCode) {
-        return UUID.nameUUIDFromBytes(("message:" + messageCode).getBytes());
-    }
-
-    /** Idem para signal codes (namespace distinto evita colisión). */
-    public static UUID signalRefId(String signalCode) {
-        return UUID.nameUUIDFromBytes(("signal:" + signalCode).getBytes());
-    }
+    public JobExecutorEntity() {}
 
     public UUID getId()                       { return id; }
     public void setId(UUID id)                { this.id = id; }
@@ -89,18 +72,22 @@ public class MessageCorrelation {
     public void setProcessinstanceId(UUID id) { this.processinstanceId = id; }
     public UUID getTokenId()                  { return tokenId; }
     public void setTokenId(UUID id)           { this.tokenId = id; }
-    public UUID getMessagedefId()             { return messagedefId; }
-    public void setMessagedefId(UUID id)      { this.messagedefId = id; }
-    public String getCorrelationKey()         { return correlationKey; }
-    public void setCorrelationKey(String s)   { this.correlationKey = s; }
+    public String getJobType()                { return jobType; }
+    public void setJobType(String s)          { this.jobType = s; }
+    public OffsetDateTime getFireAt()         { return fireAt; }
+    public void setFireAt(OffsetDateTime t)   { this.fireAt = t; }
+    public Map<String, Object> getConfig()    { return config; }
+    public void setConfig(Map<String, Object> m) { this.config = m; }
     public String getLifecycle()              { return lifecycle; }
     public void setLifecycle(String s)        { this.lifecycle = s; }
-    public OffsetDateTime getExpiresAt()      { return expiresAt; }
-    public void setExpiresAt(OffsetDateTime t){ this.expiresAt = t; }
-    public OffsetDateTime getMatchedAt()      { return matchedAt; }
-    public void setMatchedAt(OffsetDateTime t){ this.matchedAt = t; }
-    public Map<String, Object> getMatchedPayload() { return matchedPayload; }
-    public void setMatchedPayload(Map<String, Object> m) { this.matchedPayload = m; }
+    public Integer getRetries()               { return retries; }
+    public void setRetries(Integer i)         { this.retries = i; }
+    public Integer getMaxRetries()            { return maxRetries; }
+    public void setMaxRetries(Integer i)      { this.maxRetries = i; }
+    public String getLastError()              { return lastError; }
+    public void setLastError(String s)        { this.lastError = s; }
+    public OffsetDateTime getFiredAt()        { return firedAt; }
+    public void setFiredAt(OffsetDateTime t)  { this.firedAt = t; }
 
     public UUID getStateId()                  { return stateId; }
     public void setStateId(UUID id)           { this.stateId = id; }

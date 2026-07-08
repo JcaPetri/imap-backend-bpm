@@ -16,25 +16,47 @@
 
 package com.imap.bpm.infrastructure.entity;
 
+import io.hypersistence.utils.hibernate.type.json.JsonBinaryType;
 import jakarta.persistence.*;
+import org.hibernate.annotations.Type;
 
 import java.time.OffsetDateTime;
+import java.util.Map;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_variable_tbl. Variables k/v por instance.
- * UNIQUE(processinstance_id, var_name).
+ * JPA entity para bpm.bpm_pro_messagecorrelation_tbl.
+ *
+ * Cada row representa un token waiting por:
+ *   - un message dirigido (correlation_key específica, ej "order_12345")
+ *   - un signal broadcast (correlation_key="__BROADCAST__")
+ *
+ * Cuando el motor recibe POST /v1/bpm/messages/correlate o /signals/broadcast,
+ * busca rows matching y reactiva los tokens correspondientes.
+ *
+ * messagedef_id es un UUID determinístico generado por
+ * `UUID.nameUUIDFromBytes("message:<code>")` o `"signal:<code>"`. Esto evita
+ * un lookup vs system EAV para resolver el UUID del messagedef definition.
  */
 @Entity
-@Table(name = "bpm_pro_variable_tbl")
-public class Variable {
+@Table(name = "bpm_pro_messagecorrelation_tbl")
+public class MessageCorrelationEntity {
+
+    public static final String BROADCAST_KEY = "__BROADCAST__";
 
     @Id @Column(name = "id")                                 private UUID id;
     @Column(name = "tenant_id", nullable = false)            private UUID tenantId;
     @Column(name = "processinstance_id", nullable = false)   private UUID processinstanceId;
-    @Column(name = "var_name", nullable = false, length = 100) private String varName;
-    @Column(name = "var_value", columnDefinition = "text")   private String varValue;
-    @Column(name = "var_type", nullable = false, length = 20) private String varType;
+    @Column(name = "token_id")                               private UUID tokenId;
+    @Column(name = "messagedef_id", nullable = false)        private UUID messagedefId;
+    @Column(name = "correlation_key", nullable = false, length = 255) private String correlationKey;
+    @Column(name = "lifecycle", nullable = false, length = 20) private String lifecycle;
+    @Column(name = "expires_at")                             private OffsetDateTime expiresAt;
+    @Column(name = "matched_at")                             private OffsetDateTime matchedAt;
+
+    @Type(JsonBinaryType.class)
+    @Column(name = "matched_payload_jsonb", columnDefinition = "jsonb")
+    private Map<String, Object> matchedPayload;
 
     @Column(name = "state_id", nullable = false)             private UUID stateId;
     @Column(name = "created_at", nullable = false, updatable = false)           private OffsetDateTime createdAt;
@@ -43,7 +65,21 @@ public class Variable {
     @Column(name = "updated_by_id")                          private UUID updatedById;
     @Column(name = "owned_by_id", updatable = false)                            private UUID ownedById;
 
-    public Variable() {}
+    public MessageCorrelationEntity() {}
+
+    /**
+     * Genera el messagedef_id determinístico para un message code.
+     * Mismo input siempre devuelve mismo UUID; permite correlation sin
+     * persistir messagedef formales en MVP.
+     */
+    public static UUID messageRefId(String messageCode) {
+        return UUID.nameUUIDFromBytes(("message:" + messageCode).getBytes());
+    }
+
+    /** Idem para signal codes (namespace distinto evita colisión). */
+    public static UUID signalRefId(String signalCode) {
+        return UUID.nameUUIDFromBytes(("signal:" + signalCode).getBytes());
+    }
 
     public UUID getId()                       { return id; }
     public void setId(UUID id)                { this.id = id; }
@@ -51,12 +87,20 @@ public class Variable {
     public void setTenantId(UUID id)          { this.tenantId = id; }
     public UUID getProcessinstanceId()        { return processinstanceId; }
     public void setProcessinstanceId(UUID id) { this.processinstanceId = id; }
-    public String getVarName()                { return varName; }
-    public void setVarName(String s)          { this.varName = s; }
-    public String getVarValue()               { return varValue; }
-    public void setVarValue(String s)         { this.varValue = s; }
-    public String getVarType()                { return varType; }
-    public void setVarType(String s)          { this.varType = s; }
+    public UUID getTokenId()                  { return tokenId; }
+    public void setTokenId(UUID id)           { this.tokenId = id; }
+    public UUID getMessagedefId()             { return messagedefId; }
+    public void setMessagedefId(UUID id)      { this.messagedefId = id; }
+    public String getCorrelationKey()         { return correlationKey; }
+    public void setCorrelationKey(String s)   { this.correlationKey = s; }
+    public String getLifecycle()              { return lifecycle; }
+    public void setLifecycle(String s)        { this.lifecycle = s; }
+    public OffsetDateTime getExpiresAt()      { return expiresAt; }
+    public void setExpiresAt(OffsetDateTime t){ this.expiresAt = t; }
+    public OffsetDateTime getMatchedAt()      { return matchedAt; }
+    public void setMatchedAt(OffsetDateTime t){ this.matchedAt = t; }
+    public Map<String, Object> getMatchedPayload() { return matchedPayload; }
+    public void setMatchedPayload(Map<String, Object> m) { this.matchedPayload = m; }
 
     public UUID getStateId()                  { return stateId; }
     public void setStateId(UUID id)           { this.stateId = id; }

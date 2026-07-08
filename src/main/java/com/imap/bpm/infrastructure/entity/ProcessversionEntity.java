@@ -17,17 +17,19 @@
 package com.imap.bpm.infrastructure.entity;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_sequenceflow_tbl (V015).
- * Arista del grafo: source_id → target_id (ambos FK a flowelement, intra-schema).
+ * JPA entity para bpm.bpm_pro_processversion_tbl (V015).
+ * Version de un processdef; `definition` = snapshot JSONB consolidado.
  */
 @Entity
-@Table(name = "bpm_pro_sequenceflow_tbl")
-public class Sequenceflow {
+@Table(name = "bpm_pro_processversion_tbl")
+public class ProcessversionEntity {
 
     @Id
     @Column(name = "id")
@@ -36,20 +38,21 @@ public class Sequenceflow {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
-    @Column(name = "processversion_id", nullable = false)
-    private UUID processversionId;
+    @Column(name = "processdef_id", nullable = false)
+    private UUID processdefId;
 
-    @Column(name = "source_id", nullable = false)
-    private UUID sourceId;
+    @Column(name = "version", nullable = false)
+    private Integer version;
 
-    @Column(name = "target_id", nullable = false)
-    private UUID targetId;
+    @Column(name = "published_at")
+    private OffsetDateTime publishedAt;
 
-    @Column(name = "condition_expr")
-    private String conditionExpr;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "definition")
+    private String definition;
 
-    @Column(name = "sort_order")
-    private Integer sortOrder;
+    @Column(name = "is_locked", nullable = false)
+    private boolean locked;
 
     @Column(name = "description")
     private String description;
@@ -76,16 +79,16 @@ public class Sequenceflow {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
-    public UUID getProcessversionId() { return processversionId; }
-    public void setProcessversionId(UUID processversionId) { this.processversionId = processversionId; }
-    public UUID getSourceId() { return sourceId; }
-    public void setSourceId(UUID sourceId) { this.sourceId = sourceId; }
-    public UUID getTargetId() { return targetId; }
-    public void setTargetId(UUID targetId) { this.targetId = targetId; }
-    public String getConditionExpr() { return conditionExpr; }
-    public void setConditionExpr(String conditionExpr) { this.conditionExpr = conditionExpr; }
-    public Integer getSortOrder() { return sortOrder; }
-    public void setSortOrder(Integer sortOrder) { this.sortOrder = sortOrder; }
+    public UUID getProcessdefId() { return processdefId; }
+    public void setProcessdefId(UUID processdefId) { this.processdefId = processdefId; }
+    public Integer getVersion() { return version; }
+    public void setVersion(Integer version) { this.version = version; }
+    public OffsetDateTime getPublishedAt() { return publishedAt; }
+    public void setPublishedAt(OffsetDateTime publishedAt) { this.publishedAt = publishedAt; }
+    public String getDefinition() { return definition; }
+    public void setDefinition(String definition) { this.definition = definition; }
+    public boolean isLocked() { return locked; }
+    public void setLocked(boolean locked) { this.locked = locked; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
     public UUID getStateId() { return stateId; }

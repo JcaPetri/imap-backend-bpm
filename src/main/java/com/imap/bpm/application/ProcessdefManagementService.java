@@ -20,11 +20,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.domain.dto.CreateProcessdefRequest;
 import com.imap.bpm.domain.dto.CreateProcessdefResponse;
 import com.imap.bpm.infrastructure.SystemEntityResolver;
-import com.imap.bpm.infrastructure.entity.Flowelement;
-import com.imap.bpm.infrastructure.entity.Processdef;
-import com.imap.bpm.infrastructure.entity.Processversion;
-import com.imap.bpm.infrastructure.entity.Sequenceflow;
-import com.imap.bpm.infrastructure.entity.Taskform;
+import com.imap.bpm.infrastructure.entity.FlowelementEntity;
+import com.imap.bpm.infrastructure.entity.ProcessdefEntity;
+import com.imap.bpm.infrastructure.entity.ProcessversionEntity;
+import com.imap.bpm.infrastructure.entity.SequenceflowEntity;
+import com.imap.bpm.infrastructure.entity.TaskformEntity;
 import com.imap.bpm.infrastructure.repository.FlowelementRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.ProcessdefRepository;
@@ -117,7 +117,7 @@ public class ProcessdefManagementService {
         int tfCount = req.taskForms() == null ? 0 : req.taskForms().size();
 
         if (dryRun) {
-            log.info("Processdef create — DRY RUN OK code='{}' flowElements={} sequenceFlows={} taskForms={}",
+            log.info("ProcessdefEntity create — DRY RUN OK code='{}' flowElements={} sequenceFlows={} taskForms={}",
                 req.header().code(), feCount, sfCount, tfCount);
             return new CreateProcessdefResponse(null, null, 1,
                 new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
@@ -126,8 +126,8 @@ public class ProcessdefManagementService {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-        // 2. Processdef (header)
-        Processdef pd = new Processdef();
+        // 2. ProcessdefEntity (header)
+        ProcessdefEntity pd = new ProcessdefEntity();
         pd.setId(UUID.randomUUID());
         pd.setCode(req.header().code());
         pd.setName(req.header().name());
@@ -142,8 +142,8 @@ public class ProcessdefManagementService {
         pd.setUpdatedAt(now);
         processdefRepository.save(pd);
 
-        // 3. Processversion v1
-        Processversion pv = new Processversion();
+        // 3. ProcessversionEntity v1
+        ProcessversionEntity pv = new ProcessversionEntity();
         pv.setId(UUID.randomUUID());
         pv.setProcessdefId(pd.getId());
         pv.setVersion(1);
@@ -164,12 +164,12 @@ public class ProcessdefManagementService {
         // 5-7. Grafo (flowElements → sequenceFlows → taskForms) sobre la version v1.
         writeGraph(req, pv.getId(), tenantId, userId);
 
-        log.info("Processdef created code='{}' id={} v1={} (fe={}, sf={}, tf={})",
+        log.info("ProcessdefEntity created code='{}' id={} v1={} (fe={}, sf={}, tf={})",
             pd.getCode(), pd.getId(), pv.getId(), feCount, sfCount, tfCount);
 
         return new CreateProcessdefResponse(pd.getId(), pv.getId(), 1,
             new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
-            "Processdef created", false);
+            "ProcessdefEntity created", false);
     }
 
     /**
@@ -183,7 +183,7 @@ public class ProcessdefManagementService {
         // Flow elements → mapa code→id (para resolver source/target + taskforms)
         Map<String, UUID> feIdByCode = new LinkedHashMap<>();
         for (CreateProcessdefRequest.FlowElement fe : req.flowElements()) {
-            Flowelement e = new Flowelement();
+            FlowelementEntity e = new FlowelementEntity();
             e.setId(UUID.randomUUID());
             e.setProcessversionId(processversionId);
             e.setElementCode(fe.code());
@@ -202,7 +202,7 @@ public class ProcessdefManagementService {
         // Sequence flows (source/target resueltos del mapa)
         if (req.sequenceFlows() != null) {
             for (CreateProcessdefRequest.SequenceFlow sf : req.sequenceFlows()) {
-                Sequenceflow e = new Sequenceflow();
+                SequenceflowEntity e = new SequenceflowEntity();
                 e.setId(UUID.randomUUID());
                 e.setProcessversionId(processversionId);
                 e.setSourceId(feIdByCode.get(sf.sourceCode()));   // no-null garantizado por validateRequest
@@ -220,7 +220,7 @@ public class ProcessdefManagementService {
         // Task forms (flowElementId del mapa; entitydefId resuelto s2s)
         if (req.taskForms() != null) {
             for (CreateProcessdefRequest.TaskForm tf : req.taskForms()) {
-                Taskform e = new Taskform();
+                TaskformEntity e = new TaskformEntity();
                 e.setId(UUID.randomUUID());
                 e.setFlowelementId(feIdByCode.get(tf.flowElementCode()));
                 e.setEntitydefId(systemEntityResolver.resolveId(tf.entityDefCode(), tenantId));
@@ -257,9 +257,9 @@ public class ProcessdefManagementService {
         boolean dryRun = Boolean.TRUE.equals(req.dryRun());
 
         // 1. Verificar existencia (null → el controller devuelve 404)
-        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) {
-            throw new IllegalArgumentException("Processdef not found: " + processdefId);
+            throw new IllegalArgumentException("ProcessdefEntity not found: " + processdefId);
         }
 
         // 2. Code es IMMUTABLE
@@ -291,26 +291,26 @@ public class ProcessdefManagementService {
         }
 
         // 5. Resolver la current processversion (puntero, o la única si el puntero está vacío)
-        Processversion pv = null;
+        ProcessversionEntity pv = null;
         if (pd.getCurrentversionId() != null) {
             pv = processversionRepository.findById(pd.getCurrentversionId()).orElse(null);
         }
         if (pv == null) {
-            List<Processversion> versions = processversionRepository
+            List<ProcessversionEntity> versions = processversionRepository
                 .findByProcessdefIdOrderByVersionDesc(processdefId);
             if (!versions.isEmpty()) pv = versions.get(0);
         }
         if (pv == null) {
-            throw new IllegalStateException("Processversion not found for processdef " + processdefId);
+            throw new IllegalStateException("ProcessversionEntity not found for processdef " + processdefId);
         }
         UUID pvId = pv.getId();
 
         // 6. Borrar shape existente de la version (taskforms → sequenceflows → flowelements)
         //    Los taskforms cuelgan de los flowelements, así que se borran ANTES.
-        List<Flowelement> existingFe = flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
+        List<FlowelementEntity> existingFe = flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
         if (!existingFe.isEmpty()) {
             List<UUID> feIds = new ArrayList<>(existingFe.size());
-            for (Flowelement fe : existingFe) feIds.add(fe.getId());
+            for (FlowelementEntity fe : existingFe) feIds.add(fe.getId());
             taskformRepository.deleteByFlowelementIdIn(feIds);
         }
         sequenceflowRepository.deleteByProcessversionId(pvId);
@@ -330,7 +330,7 @@ public class ProcessdefManagementService {
         pd.setUpdatedAt(now);
         processdefRepository.save(pd);
 
-        log.info("Processdef updated — code='{}' processdefId={} pv={} fe={} sf={} tf={}",
+        log.info("ProcessdefEntity updated — code='{}' processdefId={} pv={} fe={} sf={} tf={}",
             pd.getCode(), processdefId, pvId, feCount, sfCount, tfCount);
 
         return new CreateProcessdefResponse(processdefId, pvId,
@@ -345,15 +345,15 @@ public class ProcessdefManagementService {
      * Carga la entity existente (preserva created_at) y solo modifica lifecycle + updated_at.
      */
     public void softDelete(UUID processdefId, UUID userId) {
-        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) {
-            throw new IllegalArgumentException("Processdef not found: " + processdefId);
+            throw new IllegalArgumentException("ProcessdefEntity not found: " + processdefId);
         }
         pd.setLifecycle("inactive");
         pd.setUpdatedById(userId);
         pd.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
         processdefRepository.save(pd);
-        log.info("Processdef {} soft-deleted (lifecycle=inactive)", processdefId);
+        log.info("ProcessdefEntity {} soft-deleted (lifecycle=inactive)", processdefId);
     }
 
     /**
@@ -371,9 +371,9 @@ public class ProcessdefManagementService {
         boolean dryRun = Boolean.TRUE.equals(req.dryRun());
 
         // 1. Verificar existencia
-        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) {
-            throw new IllegalArgumentException("Processdef not found: " + processdefId);
+            throw new IllegalArgumentException("ProcessdefEntity not found: " + processdefId);
         }
 
         // 2. Code immutable (las versions de un mismo processdef comparten code)
@@ -387,7 +387,7 @@ public class ProcessdefManagementService {
         validateRequest(req, true, tenantId);
 
         // 4. version = max(existing) + 1
-        List<Processversion> versions = processversionRepository
+        List<ProcessversionEntity> versions = processversionRepository
             .findByProcessdefIdOrderByVersionDesc(processdefId);
         int currentMaxVer = 0;
         if (!versions.isEmpty() && versions.get(0).getVersion() != null) {
@@ -408,7 +408,7 @@ public class ProcessdefManagementService {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         // 5. Crear la nueva processversion (single-INSERT)
-        Processversion pv = new Processversion();
+        ProcessversionEntity pv = new ProcessversionEntity();
         pv.setId(UUID.randomUUID());
         pv.setProcessdefId(processdefId);
         pv.setVersion(newVer);
@@ -453,9 +453,9 @@ public class ProcessdefManagementService {
      * currentVersionId, versionCount.
      */
     public List<Map<String, Object>> listAll(UUID tenantId) {
-        List<Processdef> defs = processdefRepository.findByTenantIdOrderByCode(tenantId);
+        List<ProcessdefEntity> defs = processdefRepository.findByTenantIdOrderByCode(tenantId);
         List<Map<String, Object>> out = new ArrayList<>(defs.size());
-        for (Processdef pd : defs) {
+        for (ProcessdefEntity pd : defs) {
             int versionCount = processversionRepository
                 .findByProcessdefIdOrderByVersionDesc(pd.getId()).size();
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -479,29 +479,29 @@ public class ProcessdefManagementService {
      * reuso 1:1 en el builder del frontend. Devuelve null si no existe.
      */
     public Map<String, Object> getDetail(UUID processdefId) {
-        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) return null;
 
         // currentversion (o última si el puntero está vacío)
-        Processversion pv = null;
+        ProcessversionEntity pv = null;
         if (pd.getCurrentversionId() != null) {
             pv = processversionRepository.findById(pd.getCurrentversionId()).orElse(null);
         }
         if (pv == null) {
-            List<Processversion> versions = processversionRepository
+            List<ProcessversionEntity> versions = processversionRepository
                 .findByProcessdefIdOrderByVersionDesc(processdefId);
             if (!versions.isEmpty()) pv = versions.get(0);
         }
         UUID pvId = pv == null ? null : pv.getId();
 
         // Grafo (id→code para resolver source/target de las aristas)
-        List<Flowelement> feEntities = pvId == null ? List.of()
+        List<FlowelementEntity> feEntities = pvId == null ? List.of()
             : flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
         Map<UUID, String> codeById = new HashMap<>();
-        for (Flowelement fe : feEntities) codeById.put(fe.getId(), fe.getElementCode());
+        for (FlowelementEntity fe : feEntities) codeById.put(fe.getId(), fe.getElementCode());
 
         List<Map<String, Object>> flowElements = new ArrayList<>();
-        for (Flowelement fe : feEntities) {
+        for (FlowelementEntity fe : feEntities) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("code", fe.getElementCode());
             m.put("name", fe.getName());
@@ -513,7 +513,7 @@ public class ProcessdefManagementService {
 
         List<Map<String, Object>> sequenceFlows = new ArrayList<>();
         if (pvId != null) {
-            for (Sequenceflow sf : sequenceflowRepository.findByProcessversionIdOrderBySortOrder(pvId)) {
+            for (SequenceflowEntity sf : sequenceflowRepository.findByProcessversionIdOrderBySortOrder(pvId)) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("sourceCode", codeById.get(sf.getSourceId()));
                 m.put("targetCode", codeById.get(sf.getTargetId()));
@@ -526,7 +526,7 @@ public class ProcessdefManagementService {
         List<Map<String, Object>> taskForms = new ArrayList<>();
         if (!codeById.isEmpty()) {
             List<UUID> feIds = new ArrayList<>(codeById.keySet());
-            for (Taskform tf : taskformRepository.findByFlowelementIdIn(feIds)) {
+            for (TaskformEntity tf : taskformRepository.findByFlowelementIdIn(feIds)) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("flowElementCode", codeById.get(tf.getFlowelementId()));
                 // entityDefId es la FK local; entityDefCode se resuelve s2s (el builder trabaja por code).
@@ -562,17 +562,17 @@ public class ProcessdefManagementService {
      * queries LOCALES en bpm (F4-mgmt disolvió el SQL cross-service que hacía system).
      */
     public List<Map<String, Object>> listVersions(UUID processdefId) {
-        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
+        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
         UUID currentVerId = pd == null ? null : pd.getCurrentversionId();
 
-        List<Processversion> versions = processversionRepository
+        List<ProcessversionEntity> versions = processversionRepository
             .findByProcessdefIdOrderByVersionDesc(processdefId);
         // asc por version (el finder devuelve desc)
         versions.sort(Comparator.comparing(
             v -> v.getVersion() == null ? 0 : v.getVersion()));
 
         List<Map<String, Object>> out = new ArrayList<>(versions.size());
-        for (Processversion v : versions) {
+        for (ProcessversionEntity v : versions) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("processversionId", v.getId().toString());
             m.put("version", v.getVersion() == null ? 0 : v.getVersion());

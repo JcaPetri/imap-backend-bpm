@@ -16,14 +16,14 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.Migrationplan;
+import com.imap.bpm.infrastructure.entity.MigrationplanEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface MigrationplanRepository extends JpaRepository<Migrationplan, UUID> {
-    List<Migrationplan> findByTenantIdOrderByCreatedAtDesc(UUID tenantId);
-    Optional<Migrationplan> findByTenantIdAndCode(UUID tenantId, String code);
+public interface MigrationplanRepository extends JpaRepository<MigrationplanEntity, UUID> {
+    List<MigrationplanEntity> findByTenantIdOrderByCreatedAtDesc(UUID tenantId);
+    Optional<MigrationplanEntity> findByTenantIdAndCode(UUID tenantId, String code);
 }

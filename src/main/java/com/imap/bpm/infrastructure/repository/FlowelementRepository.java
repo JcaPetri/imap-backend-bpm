@@ -16,19 +16,19 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.Flowelement;
+import com.imap.bpm.infrastructure.entity.FlowelementEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.UUID;
 
-public interface FlowelementRepository extends JpaRepository<Flowelement, UUID> {
-    List<Flowelement> findByProcessversionIdOrderBySortOrder(UUID processversionId);
+public interface FlowelementRepository extends JpaRepository<FlowelementEntity, UUID> {
+    List<FlowelementEntity> findByProcessversionIdOrderBySortOrder(UUID processversionId);
 
     /** F4-mgmt update: borra los flowelements de la version antes de recrear su shape.
      *  Bulk @Modifying (ejecución inmediata) — un deleteBy derivado es find-then-remove
      *  diferido y Hibernate ordena INSERTS antes que DELETES en el flush → colisión uq. */
     @org.springframework.data.jpa.repository.Modifying
-    @org.springframework.data.jpa.repository.Query("delete from Flowelement f where f.processversionId = ?1")
+    @org.springframework.data.jpa.repository.Query("delete from FlowelementEntity f where f.processversionId = ?1")
     int deleteByProcessversionId(UUID processversionId);
 }

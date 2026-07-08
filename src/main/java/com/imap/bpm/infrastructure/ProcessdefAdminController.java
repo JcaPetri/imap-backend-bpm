@@ -162,8 +162,8 @@ public class ProcessdefAdminController {
         }
     }
 
-    /** El service tira IllegalArgumentException("Processdef not found: ...") cuando no existe → 404. */
+    /** El service tira IllegalArgumentException("ProcessdefEntity not found: ...") cuando no existe → 404. */
     private static boolean isNotFound(IllegalArgumentException ex) {
-        return ex.getMessage() != null && ex.getMessage().startsWith("Processdef not found");
+        return ex.getMessage() != null && ex.getMessage().startsWith("ProcessdefEntity not found");
     }
 }

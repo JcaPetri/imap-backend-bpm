@@ -16,12 +16,12 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.DmnRule;
+import com.imap.bpm.infrastructure.entity.DmnRuleEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.UUID;
 
-public interface DmnRuleRepository extends JpaRepository<DmnRule, UUID> {
-    List<DmnRule> findByDecisiondefIdOrderByPriorityAsc(UUID decisiondefId);
+public interface DmnRuleRepository extends JpaRepository<DmnRuleEntity, UUID> {
+    List<DmnRuleEntity> findByDecisiondefIdOrderByPriorityAsc(UUID decisiondefId);
 }

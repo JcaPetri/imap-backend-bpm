@@ -17,21 +17,18 @@
 package com.imap.bpm.infrastructure.entity;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_processdef_tbl (V015).
- *
- * Cabecera de una definición de proceso. Migrada del cell-store EAV de system
- * a tabla relacional en bpm (ver IMAP_BPM_OWNERSHIP_MIGRATION.md).
- * currentversion_id = puntero lógico a la version vigente (sin FK física por
- * circularidad con processversion).
+ * JPA entity para bpm.bpm_dmn_decisiondef_tbl (V015). Cabecera de una tabla DMN.
  */
 @Entity
-@Table(name = "bpm_pro_processdef_tbl")
-public class Processdef {
+@Table(name = "bpm_dmn_decisiondef_tbl")
+public class DecisiondefEntity {
 
     @Id
     @Column(name = "id")
@@ -49,14 +46,16 @@ public class Processdef {
     @Column(name = "description")
     private String description;
 
-    @Column(name = "currentversion_id")
-    private UUID currentversionId;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "input_schema")
+    private String inputSchema;
 
-    @Column(name = "lifecycle", nullable = false, length = 20)
-    private String lifecycle;       // 'active' | 'inactive'
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "output_schema")
+    private String outputSchema;
 
-    @Column(name = "start_permission")
-    private String startPermission;
+    @Column(name = "hit_policy", length = 20)
+    private String hitPolicy;
 
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
@@ -86,12 +85,12 @@ public class Processdef {
     public void setName(String name) { this.name = name; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
-    public UUID getCurrentversionId() { return currentversionId; }
-    public void setCurrentversionId(UUID currentversionId) { this.currentversionId = currentversionId; }
-    public String getLifecycle() { return lifecycle; }
-    public void setLifecycle(String lifecycle) { this.lifecycle = lifecycle; }
-    public String getStartPermission() { return startPermission; }
-    public void setStartPermission(String startPermission) { this.startPermission = startPermission; }
+    public String getInputSchema() { return inputSchema; }
+    public void setInputSchema(String inputSchema) { this.inputSchema = inputSchema; }
+    public String getOutputSchema() { return outputSchema; }
+    public void setOutputSchema(String outputSchema) { this.outputSchema = outputSchema; }
+    public String getHitPolicy() { return hitPolicy; }
+    public void setHitPolicy(String hitPolicy) { this.hitPolicy = hitPolicy; }
     public UUID getStateId() { return stateId; }
     public void setStateId(UUID stateId) { this.stateId = stateId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }

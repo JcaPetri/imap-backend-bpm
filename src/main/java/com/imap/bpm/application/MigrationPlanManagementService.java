@@ -17,10 +17,10 @@
 package com.imap.bpm.application;
 
 import com.imap.bpm.domain.dto.MigrationPlanDto;
-import com.imap.bpm.infrastructure.entity.Flowelement;
-import com.imap.bpm.infrastructure.entity.Migrationplan;
-import com.imap.bpm.infrastructure.entity.Migrationrule;
-import com.imap.bpm.infrastructure.entity.Processversion;
+import com.imap.bpm.infrastructure.entity.FlowelementEntity;
+import com.imap.bpm.infrastructure.entity.MigrationplanEntity;
+import com.imap.bpm.infrastructure.entity.MigrationruleEntity;
+import com.imap.bpm.infrastructure.entity.ProcessversionEntity;
 import com.imap.bpm.infrastructure.repository.FlowelementRepository;
 import com.imap.bpm.infrastructure.repository.MigrationplanRepository;
 import com.imap.bpm.infrastructure.repository.MigrationruleRepository;
@@ -120,7 +120,7 @@ public class MigrationPlanManagementService {
 
         // 3. Crear header del plan (single-INSERT, pero seteamos created_at/updated_at
         //    explícito para no depender del DEFAULT now() en el flush).
-        Migrationplan plan = new Migrationplan();
+        MigrationplanEntity plan = new MigrationplanEntity();
         plan.setId(UUID.randomUUID());
         plan.setCode(req.code());
         plan.setDescription(blankToNull(req.description()));
@@ -159,7 +159,7 @@ public class MigrationPlanManagementService {
     private void createRule(UUID planId, String srcCode, String tgtCode, String action,
                             int sortOrder, String notes,
                             UUID tenantId, UUID userId, OffsetDateTime now) {
-        Migrationrule rule = new Migrationrule();
+        MigrationruleEntity rule = new MigrationruleEntity();
         rule.setId(UUID.randomUUID());
         rule.setMigrationplanId(planId);
         rule.setSourceFlowelementCode(srcCode);
@@ -185,9 +185,9 @@ public class MigrationPlanManagementService {
      * processdefId: se resuelve via la source processversion → processdef.
      */
     public List<MigrationPlanDto.PlanSummary> listPlans(UUID tenantId, String processdefId) {
-        List<Migrationplan> plans = planRepo.findByTenantIdOrderByCreatedAtDesc(tenantId);
+        List<MigrationplanEntity> plans = planRepo.findByTenantIdOrderByCreatedAtDesc(tenantId);
         List<MigrationPlanDto.PlanSummary> out = new ArrayList<>();
-        for (Migrationplan plan : plans) {
+        for (MigrationplanEntity plan : plans) {
             if (processdefId != null && !processdefId.isBlank()) {
                 UUID pdId = lookupProcessdefIdOfPv(plan.getSourceProcessversionId());
                 if (pdId == null || !pdId.toString().equals(processdefId)) continue;
@@ -199,7 +199,7 @@ public class MigrationPlanManagementService {
 
     /** Detalle del plan: header + rules ordenadas. Tira NoSuchElementException si no existe. */
     public MigrationPlanDto.PlanDetail getPlanDetail(UUID planId) {
-        Migrationplan plan = planRepo.findById(planId).orElse(null);
+        MigrationplanEntity plan = planRepo.findById(planId).orElse(null);
         if (plan == null) {
             throw new NoSuchElementException("Migration plan not found: " + planId);
         }
@@ -218,7 +218,7 @@ public class MigrationPlanManagementService {
      */
     public MigrationPlanDto.PlanDetail updateRules(UUID planId, MigrationPlanDto.UpdateRulesRequest req,
                                                    UUID tenantId, UUID userId) {
-        Migrationplan plan = planRepo.findById(planId).orElse(null);
+        MigrationplanEntity plan = planRepo.findById(planId).orElse(null);
         if (plan == null) throw new NoSuchElementException("Plan not found: " + planId);
         if ("applied".equals(plan.getStatus())) {
             throw new IllegalStateException("Cannot edit rules of an applied plan");
@@ -269,7 +269,7 @@ public class MigrationPlanManagementService {
      * Portada fiel de system.MigrationService.validatePlan.
      */
     public MigrationPlanDto.ValidationReport validatePlan(UUID planId, UUID userId) {
-        Migrationplan plan = planRepo.findById(planId).orElse(null);
+        MigrationplanEntity plan = planRepo.findById(planId).orElse(null);
         if (plan == null) throw new NoSuchElementException("Plan not found: " + planId);
 
         UUID srcPvId = plan.getSourceProcessversionId();
@@ -349,7 +349,7 @@ public class MigrationPlanManagementService {
      */
     public MigrationPlanDto.PlanSummary markApplyResult(UUID planId, String appliedByUserId,
                                                         String statsJson, boolean success) {
-        Migrationplan plan = planRepo.findById(planId).orElse(null);
+        MigrationplanEntity plan = planRepo.findById(planId).orElse(null);
         if (plan == null) throw new NoSuchElementException("Plan not found: " + planId);
 
         // Idempotency: si ya está applied, no re-marcar (devuelve current)
@@ -381,7 +381,7 @@ public class MigrationPlanManagementService {
     //  Helpers
     // ════════════════════════════════════════════════════════════════════════
 
-    private MigrationPlanDto.PlanSummary toSummary(Migrationplan plan) {
+    private MigrationPlanDto.PlanSummary toSummary(MigrationplanEntity plan) {
         return new MigrationPlanDto.PlanSummary(
             plan.getId().toString(),
             plan.getCode(),
@@ -396,9 +396,9 @@ public class MigrationPlanManagementService {
     }
 
     private List<MigrationPlanDto.RuleDto> loadRules(UUID planId) {
-        List<Migrationrule> rules = ruleRepo.findByMigrationplanIdOrderBySortOrder(planId);
+        List<MigrationruleEntity> rules = ruleRepo.findByMigrationplanIdOrderBySortOrder(planId);
         List<MigrationPlanDto.RuleDto> out = new ArrayList<>(rules.size());
-        for (Migrationrule r : rules) {
+        for (MigrationruleEntity r : rules) {
             out.add(new MigrationPlanDto.RuleDto(
                 r.getSourceFlowelementCode(),
                 r.getTargetFlowelementCode(),
@@ -412,17 +412,17 @@ public class MigrationPlanManagementService {
 
     /** Codes de los flowElements de una processversion (LOCAL — antes system leía cells). */
     private List<String> loadFlowElementCodes(UUID processversionId) {
-        List<Flowelement> elements = flowelementRepository
+        List<FlowelementEntity> elements = flowelementRepository
             .findByProcessversionIdOrderBySortOrder(processversionId);
         List<String> out = new ArrayList<>(elements.size());
-        for (Flowelement fe : elements) out.add(fe.getElementCode());
+        for (FlowelementEntity fe : elements) out.add(fe.getElementCode());
         return out;
     }
 
     /** processdef_id de una processversion (para el filtro de listPlans). */
     private UUID lookupProcessdefIdOfPv(UUID pvId) {
         if (pvId == null) return null;
-        Processversion pv = processversionRepository.findById(pvId).orElse(null);
+        ProcessversionEntity pv = processversionRepository.findById(pvId).orElse(null);
         return pv == null ? null : pv.getProcessdefId();
     }
 

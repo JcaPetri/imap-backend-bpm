@@ -41,23 +41,23 @@ import java.util.*;
  * MVP scope (todo lo necesario para correr el proceso Login):
  *   - start_event       → avanza
  *   - end_event         → consume token, si último cerro instance
- *   - user_task         → token.waiting + crea TaskInstance + detiene
+ *   - user_task         → token.waiting + crea TaskInstanceEntity + detiene
  *   - service_task      → MVP: audita + avanza al siguiente (sin invocar service real)
  *   - exclusive_gateway → evalúa conditions JEXL, avanza el primero que matchea
  *   - parallel_gateway  → SPLIT (1-in N-out: emite N child tokens) +
  *                         JOIN  (M-in 1-out: espera todos siblings con mismo
  *                                parent_token_id antes de avanzar al outgoing)
  *   - intermediate_event (timer/message/signal): A2 — timer programa job
- *                         vía JobExecutor; message/signal subscribe correlations
+ *                         vía JobExecutorEntity; message/signal subscribe correlations
  *                         que reactivan tokens al recibir POST a /messages/
  *                         correlate o /signals/broadcast.
- *   - sub_process       (B1 — call activity): spawnea child ProcessInstance
+ *   - sub_process       (B1 — call activity): spawnea child ProcessInstanceEntity
  *                         con parent_instance_id + parent_token_id; al
  *                         completar el child, copia returnVariables al parent
  *                         y reactiva el token waiting en el sub_process.
  *   - boundary_event    (B2 — interrupting timer sobre user_task): adosado
  *                         a una activity vía config.boundary.attachedTo;
- *                         schedula JobExecutor al crear la activity; al
+ *                         schedula JobExecutorEntity al crear la activity; al
  *                         disparar, cancela la task + consume token + crea
  *                         nuevo token en outgoing del boundary.
  *   - business_rule_task (B3 — DMN): config.decisionRef apunta a un
@@ -181,7 +181,7 @@ public class ProcessEngine {
      * @param userId           UUID del user que dispara, puede ser null (anonymous)
      */
     @Transactional
-    public ProcessInstance startProcess(UUID processVersionId,
+    public ProcessInstanceEntity startProcess(UUID processVersionId,
                                         Map<String, Object> payload,
                                         String bearerToken,
                                         UUID tenantId,
@@ -208,10 +208,10 @@ public class ProcessEngine {
      * @param bearerToken    JWT del caller para propagar a s2s (puede ser null en service calls)
      * @param tenantId       Tenant_id del caller
      * @param userId         UUID del user que dispara (puede ser null para events sin user)
-     * @return Lista de ProcessInstance creadas (puede estar vacía si no hay subscriptions)
+     * @return Lista de ProcessInstanceEntity creadas (puede estar vacía si no hay subscriptions)
      */
     @Transactional
-    public List<ProcessInstance> startProcessByMessage(String messageCode,
+    public List<ProcessInstanceEntity> startProcessByMessage(String messageCode,
                                                        Map<String, Object> payload,
                                                        String bearerToken,
                                                        UUID tenantId,
@@ -227,7 +227,7 @@ public class ProcessEngine {
         // Sin aplicar tenantSession, el query devuelve 0 rows aunque haya subscriptions.
         tenantSession.applyToCurrentTransaction();
 
-        List<com.imap.bpm.infrastructure.entity.MessageStartSubscription> subs =
+        List<com.imap.bpm.infrastructure.entity.MessageStartSubscriptionEntity> subs =
             msgStartSubRepo.findActiveByTenantAndMessageCode(tenantId, messageCode);
 
         if (subs.isEmpty()) {
@@ -239,14 +239,14 @@ public class ProcessEngine {
         log.info("Found {} active message-start subscriptions for tenant {} message '{}'",
             subs.size(), tenantId, messageCode);
 
-        List<ProcessInstance> instances = new ArrayList<>(subs.size());
-        for (com.imap.bpm.infrastructure.entity.MessageStartSubscription sub : subs) {
+        List<ProcessInstanceEntity> instances = new ArrayList<>(subs.size());
+        for (com.imap.bpm.infrastructure.entity.MessageStartSubscriptionEntity sub : subs) {
             try {
                 // Each call is its own transaction (via @Transactional on startProcess).
                 // self.startProcess para que el proxy de Spring aplique la @Transactional
                 // (sin self, la self-invocation no atraviesa el CGLIB proxy y la tx no abre,
                 // rompiendo el applyToCurrentTransaction MANDATORY de tenantSession).
-                ProcessInstance inst = self.startProcess(
+                ProcessInstanceEntity inst = self.startProcess(
                     sub.getProcessversionId(), payload, bearerToken, tenantId, userId);
                 instances.add(inst);
                 metricInc("bpm.instance.started_by_message", sub.getMessageCode());
@@ -267,7 +267,7 @@ public class ProcessEngine {
      * child en bpm_pro_processinstance_tbl. Al completar (handleEndEvent),
      * el motor notifica al parent y avanza el token waiting.
      */
-    private ProcessInstance startProcessInternal(UUID processVersionId,
+    private ProcessInstanceEntity startProcessInternal(UUID processVersionId,
                                                   Map<String, Object> payload,
                                                   String bearerToken,
                                                   UUID tenantId,
@@ -290,8 +290,8 @@ public class ProcessEngine {
             .orElseThrow(() -> new IllegalStateException(
                 "No start_event in processVersion " + processVersionId));
 
-        // 2. Crear ProcessInstance (con parent refs si es sub_process)
-        ProcessInstance instance = newInstance(def, tenantId, userId);
+        // 2. Crear ProcessInstanceEntity (con parent refs si es sub_process)
+        ProcessInstanceEntity instance = newInstance(def, tenantId, userId);
         instance.setParentInstanceId(parentInstanceId);
         instance.setParentTokenId(parentTokenId);
         instanceRepo.save(instance);
@@ -309,8 +309,8 @@ public class ProcessEngine {
             }
         }
 
-        // 4. Token inicial en start_event
-        Token token = newToken(instance, start.id(), null);
+        // 4. TokenEntity inicial en start_event
+        TokenEntity token = newToken(instance, start.id(), null);
         tokenRepo.save(token);
         audit(instance, "token.entered", start.id(), token.getId(), userId, Map.of(
             "elementCode", start.code(),
@@ -327,15 +327,15 @@ public class ProcessEngine {
     }
 
     /**
-     * Completa una TaskInstance: merge outputData en variables + avanza el token.
+     * Completa una TaskInstanceEntity: merge outputData en variables + avanza el token.
      */
     @Transactional
-    public TaskInstance completeTask(UUID taskInstanceId,
+    public TaskInstanceEntity completeTask(UUID taskInstanceId,
                                      Map<String, Object> outputData,
                                      String bearerToken,
                                      UUID userId) {
         tenantSession.applyToCurrentTransaction();
-        TaskInstance task = taskRepo.findById(taskInstanceId)
+        TaskInstanceEntity task = taskRepo.findById(taskInstanceId)
             .orElseThrow(() -> new IllegalArgumentException("Task not found: " + taskInstanceId));
         if (!List.of("created", "assigned", "in_progress").contains(task.getLifecycle())) {
             throw new IllegalStateException("Task " + taskInstanceId
@@ -350,9 +350,9 @@ public class ProcessEngine {
         task.setUpdatedById(userId);
         taskRepo.save(task);
 
-        ProcessInstance instance = instanceRepo.findById(task.getProcessinstanceId())
+        ProcessInstanceEntity instance = instanceRepo.findById(task.getProcessinstanceId())
             .orElseThrow(() -> new IllegalStateException(
-                "ProcessInstance not found for task: " + taskInstanceId));
+                "ProcessInstanceEntity not found for task: " + taskInstanceId));
 
         // Merge outputData en variables del processinstance
         if (outputData != null) {
@@ -377,9 +377,9 @@ public class ProcessEngine {
         // Avanza el token: el current element es el user_task que se acaba de
         // completar. Reactivamos el token (estaba 'waiting') y CONSUMIMOS el
         // current element pasando al siguiente — sino advanceToken vería el
-        // user_task otra vez y crearía OTRA TaskInstance (bug catched 2026-05-17).
+        // user_task otra vez y crearía OTRA TaskInstanceEntity (bug catched 2026-05-17).
         if (task.getTokenId() != null) {
-            Token token = tokenRepo.findById(task.getTokenId()).orElse(null);
+            TokenEntity token = tokenRepo.findById(task.getTokenId()).orElse(null);
             if (token != null && "waiting".equals(token.getLifecycle())) {
                 token.setLifecycle("active");
                 token.setUpdatedAt(now);
@@ -398,7 +398,7 @@ public class ProcessEngine {
     // State machine — advanceToken (recursivo hasta wait state)
     // ════════════════════════════════════════════════════════════════════════
 
-    private void advanceToken(ProcessInstance instance, Token token,
+    private void advanceToken(ProcessInstanceEntity instance, TokenEntity token,
                               ProcessDefinition def, UUID userId) {
         ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
         if (current == null) {
@@ -447,7 +447,7 @@ public class ProcessEngine {
                 // B2 — un boundary_event NO recibe tokens entrantes normales
                 // (se dispara por interrupción de su activity adjunta). Si
                 // un token llega acá, lo tratamos como passthrough con warn.
-                log.warn("Token entered boundary_event '{}' directly — unusual, treating as passthrough",
+                log.warn("TokenEntity entered boundary_event '{}' directly — unusual, treating as passthrough",
                     current.code());
                 audit(instance, "boundary_event.unexpected_entry", current.id(), token.getId(), userId,
                     Map.of("elementCode", current.code()));
@@ -478,16 +478,16 @@ public class ProcessEngine {
      *
      * Semántica: como si el user hubiera completado la activity sin output.
      */
-    public void skipForMigration(ProcessInstance instance, Token token,
+    public void skipForMigration(ProcessInstanceEntity instance, TokenEntity token,
                                   ProcessDefinition.FlowElement skipElement,
                                   ProcessDefinition targetDef, UUID userId) {
         OffsetDateTime now = OffsetDateTime.now();
 
         // 1. Cancelar tasks vivas del token (asumimos que el skip implica
         //    cerrar la activity en curso). Si no hay tasks, no-op.
-        List<TaskInstance> activeTasks = taskRepo.findByTokenIdAndLifecycleIn(
+        List<TaskInstanceEntity> activeTasks = taskRepo.findByTokenIdAndLifecycleIn(
             token.getId(), List.of("created", "reserved", "assigned", "in_progress"));
-        for (TaskInstance t : activeTasks) {
+        for (TaskInstanceEntity t : activeTasks) {
             t.setLifecycle("cancelled");
             t.setCompletedAt(now);
             t.setUpdatedAt(now);
@@ -505,14 +505,14 @@ public class ProcessEngine {
                    "boundaryJobsCancelled", cancelledJobs));
 
         // 4. Avanzar al outgoing del skipElement en targetDef.
-        //    Esto puede llegar a wait state inmediato (user_task → crear TaskInstance)
+        //    Esto puede llegar a wait state inmediato (user_task → crear TaskInstanceEntity)
         //    o cascadear hasta end_event (todo service_task/gateway).
         consumeAndMoveToNext(instance, token, skipElement, targetDef, userId);
     }
 
     // ─── consume + move ─────────────────────────────────────────────────────
 
-    private void consumeAndMoveToNext(ProcessInstance instance, Token token,
+    private void consumeAndMoveToNext(ProcessInstanceEntity instance, TokenEntity token,
                                        ProcessDefinition.FlowElement current,
                                        ProcessDefinition def, UUID userId) {
         List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(current.id());
@@ -527,7 +527,7 @@ public class ProcessEngine {
         moveTokenToElement(instance, token, next.targetId(), def, userId);
     }
 
-    private void moveTokenToElement(ProcessInstance instance, Token token,
+    private void moveTokenToElement(ProcessInstanceEntity instance, TokenEntity token,
                                      UUID nextElementId, ProcessDefinition def, UUID userId) {
         token.setCurrentElementId(nextElementId);
         token.setEnteredAt(OffsetDateTime.now());
@@ -559,7 +559,7 @@ public class ProcessEngine {
      *   - FAILURE sin boundaryErrorCode (tras retries) → token a lifecycle='failed' + audit
      *   - PENDING (V2) → no implementado, equivale a SUCCESS por ahora
      */
-    private void handleServiceTask(ProcessInstance instance, Token token,
+    private void handleServiceTask(ProcessInstanceEntity instance, TokenEntity token,
                                     ProcessDefinition.FlowElement current,
                                     ProcessDefinition def, UUID userId) {
         String serviceCode = current.config() == null ? null : (String) current.config().get("serviceCode");
@@ -640,7 +640,7 @@ public class ProcessEngine {
      * def.findBoundariesFor(current.code()), filtrar por subtype='error' +
      * config.errorCode matching, disparar el primero.
      */
-    private boolean tryFireServiceTaskBoundaryError(ProcessInstance instance, Token token,
+    private boolean tryFireServiceTaskBoundaryError(ProcessInstanceEntity instance, TokenEntity token,
                                                      ProcessDefinition.FlowElement serviceTask,
                                                      ProcessDefinition def,
                                                      String errorCode, UUID userId) {
@@ -652,7 +652,7 @@ public class ProcessEngine {
 
     // ─── end_event ──────────────────────────────────────────────────────────
 
-    private void handleEndEvent(ProcessInstance instance, Token token,
+    private void handleEndEvent(ProcessInstanceEntity instance, TokenEntity token,
                                  ProcessDefinition.FlowElement endEvent, UUID userId) {
         token.setLifecycle("consumed");
         token.setUpdatedAt(OffsetDateTime.now());
@@ -661,7 +661,7 @@ public class ProcessEngine {
             Map.of("elementCode", endEvent.code()));
 
         // Si NO hay más tokens activos en la instance → mark completed
-        List<Token> stillActive = tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+        List<TokenEntity> stillActive = tokenRepo.findByProcessinstanceIdAndLifecycleIn(
             instance.getId(), List.of("active", "waiting"));
         if (stillActive.isEmpty()) {
             instance.setLifecycle("completed");
@@ -672,7 +672,7 @@ public class ProcessEngine {
                 Map.of("result", endEvent.config() == null ? "default"
                        : endEvent.config().getOrDefault("result", "default"),
                        "endEventCode", endEvent.code()));
-            log.info("ProcessInstance {} completed via {}", instance.getId(), endEvent.code());
+            log.info("ProcessInstanceEntity {} completed via {}", instance.getId(), endEvent.code());
             metricInc("bpm.instance.ended", instance.getProcessdefId().toString());
 
             // B1 — si es child de un sub_process, notificar al parent.
@@ -690,10 +690,10 @@ public class ProcessEngine {
 
     // ─── user_task ──────────────────────────────────────────────────────────
 
-    private void handleUserTask(ProcessInstance instance, Token token,
+    private void handleUserTask(ProcessInstanceEntity instance, TokenEntity token,
                                  ProcessDefinition.FlowElement userTask,
                                  ProcessDefinition def, UUID userId) {
-        // Token queda waiting hasta que se complete la task
+        // TokenEntity queda waiting hasta que se complete la task
         token.setLifecycle("waiting");
         token.setUpdatedAt(OffsetDateTime.now());
         tokenRepo.save(token);
@@ -701,7 +701,7 @@ public class ProcessEngine {
         // Snapshot de variables current para el input_data de la task
         Map<String, Object> inputData = currentVariablesAsMap(instance);
 
-        TaskInstance task = new TaskInstance();
+        TaskInstanceEntity task = new TaskInstanceEntity();
         OffsetDateTime now = OffsetDateTime.now();
         task.setId(UUID.randomUUID());
         task.setTenantId(instance.getTenantId());
@@ -761,7 +761,7 @@ public class ProcessEngine {
 
     /**
      * Para cada boundary_event con type=timer adjunto al activity, schedula
-     * un JobExecutor con fire_at = now + delaySeconds. El job lleva en su
+     * un JobExecutorEntity con fire_at = now + delaySeconds. El job lleva en su
      * config_jsonb el marker `boundary: true` + `boundaryElementId` +
      * `attachedTaskInstanceId` (si user_task) para que fireTimerJob pueda
      * discriminar boundary vs intermediate timer.
@@ -771,7 +771,7 @@ public class ProcessEngine {
      * NOTA: scope MVP B2 → solo timer; error/escalation pendiente.
      */
     @SuppressWarnings("unchecked")
-    private int scheduleBoundaryTimers(ProcessInstance instance, Token activityToken,
+    private int scheduleBoundaryTimers(ProcessInstanceEntity instance, TokenEntity activityToken,
                                         ProcessDefinition.FlowElement activity,
                                         UUID attachedTaskInstanceId,
                                         ProcessDefinition def, UUID userId) {
@@ -803,7 +803,7 @@ public class ProcessEngine {
                 : (Map<String, Object>) cfg.getOrDefault("boundary", Map.of());
             boolean interrupting = !(Boolean.FALSE.equals(boundaryCfg.get("interrupting")));
 
-            JobExecutor job = new JobExecutor();
+            JobExecutorEntity job = new JobExecutorEntity();
             job.setId(UUID.randomUUID());
             job.setTenantId(instance.getTenantId());
             job.setProcessinstanceId(instance.getId());
@@ -848,11 +848,11 @@ public class ProcessEngine {
      */
     private int cancelBoundaryJobsForToken(UUID tokenId) {
         if (tokenId == null) return 0;
-        List<JobExecutor> jobs = jobRepo.findByTokenIdAndLifecycle(tokenId, "scheduled");
+        List<JobExecutorEntity> jobs = jobRepo.findByTokenIdAndLifecycle(tokenId, "scheduled");
         if (jobs.isEmpty()) return 0;
         OffsetDateTime now = OffsetDateTime.now();
         int cancelled = 0;
-        for (JobExecutor j : jobs) {
+        for (JobExecutorEntity j : jobs) {
             // Solo cancelar boundary jobs — no afectar timer events normales
             // (que también usan tokenId pero con boundary=false en config).
             Object boundaryFlag = j.getConfig() == null ? null : j.getConfig().get("boundary");
@@ -867,7 +867,7 @@ public class ProcessEngine {
 
     // ─── exclusive_gateway ──────────────────────────────────────────────────
 
-    private void handleExclusiveGateway(ProcessInstance instance, Token token,
+    private void handleExclusiveGateway(ProcessInstanceEntity instance, TokenEntity token,
                                          ProcessDefinition.FlowElement gateway,
                                          ProcessDefinition def, UUID userId) {
         Map<String, Object> vars = currentVariablesAsMap(instance);
@@ -920,7 +920,7 @@ public class ProcessEngine {
     @Transactional
     public Map<String, Object> cancelInstance(UUID instanceId, String reason, UUID userId) {
         tenantSession.applyToCurrentTransaction();
-        ProcessInstance instance = instanceRepo.findById(instanceId)
+        ProcessInstanceEntity instance = instanceRepo.findById(instanceId)
             .orElseThrow(() -> new IllegalArgumentException("Instance not found: " + instanceId));
         if (!"active".equals(instance.getLifecycle())) {
             throw new IllegalStateException("Cannot cancel instance " + instanceId
@@ -934,7 +934,7 @@ public class ProcessEngine {
         int corrsCancelled = 0;
 
         // Tokens vivos → consumed (consideramos cancelled como subtipo de consumed)
-        for (Token t : tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+        for (TokenEntity t : tokenRepo.findByProcessinstanceIdAndLifecycleIn(
                 instance.getId(), List.of("active", "waiting"))) {
             t.setLifecycle("consumed");
             t.setUpdatedAt(now);
@@ -943,7 +943,7 @@ public class ProcessEngine {
         }
 
         // Tasks vivas → cancelled
-        for (TaskInstance task : taskRepo.findByProcessinstanceId(instance.getId())) {
+        for (TaskInstanceEntity task : taskRepo.findByProcessinstanceId(instance.getId())) {
             if (List.of("created", "assigned", "in_progress").contains(task.getLifecycle())) {
                 task.setLifecycle("cancelled");
                 task.setUpdatedAt(now);
@@ -953,7 +953,7 @@ public class ProcessEngine {
         }
 
         // Jobs scheduled → cancelled (incluye boundary + intermediate timers)
-        for (JobExecutor job : jobRepo.findByProcessinstanceIdAndLifecycle(instance.getId(), "scheduled")) {
+        for (JobExecutorEntity job : jobRepo.findByProcessinstanceIdAndLifecycle(instance.getId(), "scheduled")) {
             job.setLifecycle("cancelled");
             job.setUpdatedAt(now);
             jobRepo.save(job);
@@ -961,7 +961,7 @@ public class ProcessEngine {
         }
 
         // Correlations waiting → cancelled
-        for (MessageCorrelation mc : msgCorrRepo.findByProcessinstanceIdAndLifecycle(instance.getId(), "waiting")) {
+        for (MessageCorrelationEntity mc : msgCorrRepo.findByProcessinstanceIdAndLifecycle(instance.getId(), "waiting")) {
             mc.setLifecycle("cancelled");
             mc.setUpdatedAt(now);
             msgCorrRepo.save(mc);
@@ -978,7 +978,7 @@ public class ProcessEngine {
         // findByParentInstanceId solo devuelve directos; los nietos se cancelan
         // en la siguiente iteración recursiva al cancelar el child.
         int childrenCascaded = 0;
-        for (ProcessInstance child : instanceRepo.findByParentInstanceId(instance.getId())) {
+        for (ProcessInstanceEntity child : instanceRepo.findByParentInstanceId(instance.getId())) {
             if ("active".equals(child.getLifecycle())) {
                 try {
                     cancelInstance(child.getId(),
@@ -1009,7 +1009,7 @@ public class ProcessEngine {
     // ─── raise error sobre activity (boundary error/escalation, advanced) ───
 
     /**
-     * Dispara un error sobre una TaskInstance activa, buscando boundary_events
+     * Dispara un error sobre una TaskInstanceEntity activa, buscando boundary_events
      * de tipo error/escalation adjuntos al activity que matcheen el errorCode.
      *
      * Si hay match → invoca el handler unificado de boundary (interrupting
@@ -1025,15 +1025,15 @@ public class ProcessEngine {
     public Map<String, Object> raiseTaskError(UUID taskInstanceId, String errorCode,
                                               Map<String, Object> payload, UUID userId) {
         tenantSession.applyToCurrentTransaction();
-        TaskInstance task = taskRepo.findById(taskInstanceId)
+        TaskInstanceEntity task = taskRepo.findById(taskInstanceId)
             .orElseThrow(() -> new IllegalArgumentException("Task not found: " + taskInstanceId));
         if (!List.of("created", "assigned", "in_progress").contains(task.getLifecycle())) {
             throw new IllegalStateException("Task " + taskInstanceId + " is not active (lifecycle="
                 + task.getLifecycle() + ")");
         }
-        ProcessInstance instance = instanceRepo.findById(task.getProcessinstanceId())
+        ProcessInstanceEntity instance = instanceRepo.findById(task.getProcessinstanceId())
             .orElseThrow(() -> new IllegalStateException("Instance not found"));
-        Token activityToken = task.getTokenId() == null ? null
+        TokenEntity activityToken = task.getTokenId() == null ? null
             : tokenRepo.findById(task.getTokenId()).orElse(null);
         if (activityToken == null) {
             throw new IllegalStateException("Activity token not found for task " + taskInstanceId);
@@ -1094,14 +1094,14 @@ public class ProcessEngine {
      *                   con parent_token_id = "grandparent" (el padre del nivel
      *                   superior, restaurando el nivel de paralelismo).
      *   1 in / 1 out  → passthrough degenerado (avanza como un nodo normal).
-     *   M in / N out  → no soportado: el modelado lo desaconseja. Token waiting
+     *   M in / N out  → no soportado: el modelado lo desaconseja. TokenEntity waiting
      *                   + warning en log.
      *
      * Garantía: en SPLIT, todos los siblings comparten parentTokenId == el id
      * del token que se splitió. En JOIN, esa relación se usa para identificar
      * "mi grupo" y no confundirme con tokens de otros splits concurrentes.
      */
-    private void handleParallelGateway(ProcessInstance instance, Token token,
+    private void handleParallelGateway(ProcessInstanceEntity instance, TokenEntity token,
                                         ProcessDefinition.FlowElement gateway,
                                         ProcessDefinition def, UUID userId) {
         List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(gateway.id());
@@ -1119,7 +1119,7 @@ public class ProcessEngine {
             ));
             metricInc("bpm.gateway.split", def);
             for (ProcessDefinition.SequenceFlow sf : outgoing) {
-                Token child = newToken(instance, sf.targetId(), token.getId());
+                TokenEntity child = newToken(instance, sf.targetId(), token.getId());
                 tokenRepo.save(child);
                 ProcessDefinition.FlowElement target = def.findElementById(sf.targetId());
                 audit(instance, "token.entered", sf.targetId(), child.getId(), userId, Map.of(
@@ -1142,9 +1142,9 @@ public class ProcessEngine {
             ));
 
             UUID myParent = token.getParentTokenId();
-            List<Token> arrived = tokenRepo.findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
+            List<TokenEntity> arrived = tokenRepo.findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
                 instance.getId(), gateway.id(), "waiting");
-            List<Token> siblings = arrived.stream()
+            List<TokenEntity> siblings = arrived.stream()
                 .filter(t -> Objects.equals(t.getParentTokenId(), myParent))
                 .toList();
 
@@ -1155,7 +1155,7 @@ public class ProcessEngine {
             }
 
             // Todos llegaron — consume siblings + emit nuevo token en outgoing
-            for (Token sib : siblings) {
+            for (TokenEntity sib : siblings) {
                 sib.setLifecycle("consumed");
                 sib.setUpdatedAt(now);
                 tokenRepo.save(sib);
@@ -1163,7 +1163,7 @@ public class ProcessEngine {
 
             // grandparent restaura el nivel de paralelismo anterior al SPLIT
             UUID grandparent = myParent == null ? null
-                : tokenRepo.findById(myParent).map(Token::getParentTokenId).orElse(null);
+                : tokenRepo.findById(myParent).map(TokenEntity::getParentTokenId).orElse(null);
 
             audit(instance, "gateway.join.completed", gateway.id(), null, userId, Map.of(
                 "gatewayCode", gateway.code(),
@@ -1172,7 +1172,7 @@ public class ProcessEngine {
             metricInc("bpm.gateway.join", def);
 
             ProcessDefinition.SequenceFlow out = outgoing.get(0);
-            Token outToken = newToken(instance, out.targetId(), grandparent);
+            TokenEntity outToken = newToken(instance, out.targetId(), grandparent);
             tokenRepo.save(outToken);
             ProcessDefinition.FlowElement target = def.findElementById(out.targetId());
             audit(instance, "token.entered", out.targetId(), outToken.getId(), userId, Map.of(
@@ -1219,7 +1219,7 @@ public class ProcessEngine {
      * processinstance al momento de crear la correlation.
      */
     @SuppressWarnings("unchecked")
-    private void handleIntermediateEvent(ProcessInstance instance, Token token,
+    private void handleIntermediateEvent(ProcessInstanceEntity instance, TokenEntity token,
                                           ProcessDefinition.FlowElement event,
                                           ProcessDefinition def, UUID userId) {
         Map<String, Object> cfg = event.config();
@@ -1243,7 +1243,7 @@ public class ProcessEngine {
         consumeAndMoveToNext(instance, token, event, def, userId);
     }
 
-    private void handleTimerEvent(ProcessInstance instance, Token token,
+    private void handleTimerEvent(ProcessInstanceEntity instance, TokenEntity token,
                                    ProcessDefinition.FlowElement event,
                                    Map<String, Object> timerCfg, UUID userId) {
         long delaySeconds;
@@ -1270,7 +1270,7 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        JobExecutor job = new JobExecutor();
+        JobExecutorEntity job = new JobExecutorEntity();
         job.setId(UUID.randomUUID());
         job.setTenantId(instance.getTenantId());
         job.setProcessinstanceId(instance.getId());
@@ -1301,7 +1301,7 @@ public class ProcessEngine {
         metricInc("bpm.timer.scheduled", instance.getProcessdefId().toString());
     }
 
-    private void handleMessageEvent(ProcessInstance instance, Token token,
+    private void handleMessageEvent(ProcessInstanceEntity instance, TokenEntity token,
                                      ProcessDefinition.FlowElement event,
                                      Map<String, Object> msgCfg, UUID userId) {
         String messageCode = stringOr(msgCfg.get("messageCode"), null);
@@ -1327,12 +1327,12 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        MessageCorrelation mc = new MessageCorrelation();
+        MessageCorrelationEntity mc = new MessageCorrelationEntity();
         mc.setId(UUID.randomUUID());
         mc.setTenantId(instance.getTenantId());
         mc.setProcessinstanceId(instance.getId());
         mc.setTokenId(token.getId());
-        mc.setMessagedefId(MessageCorrelation.messageRefId(messageCode));
+        mc.setMessagedefId(MessageCorrelationEntity.messageRefId(messageCode));
         mc.setCorrelationKey(resolvedKey);
         mc.setLifecycle("waiting");
         mc.setStateId(DEFAULT_STATE_ACTIVE);
@@ -1351,7 +1351,7 @@ public class ProcessEngine {
         metricInc("bpm.message.subscribed", instance.getProcessdefId().toString());
     }
 
-    private void handleSignalEvent(ProcessInstance instance, Token token,
+    private void handleSignalEvent(ProcessInstanceEntity instance, TokenEntity token,
                                     ProcessDefinition.FlowElement event,
                                     Map<String, Object> sigCfg, UUID userId) {
         String signalCode = stringOr(sigCfg.get("signalCode"), null);
@@ -1369,13 +1369,13 @@ public class ProcessEngine {
         token.setUpdatedAt(now);
         tokenRepo.save(token);
 
-        MessageCorrelation mc = new MessageCorrelation();
+        MessageCorrelationEntity mc = new MessageCorrelationEntity();
         mc.setId(UUID.randomUUID());
         mc.setTenantId(instance.getTenantId());
         mc.setProcessinstanceId(instance.getId());
         mc.setTokenId(token.getId());
-        mc.setMessagedefId(MessageCorrelation.signalRefId(signalCode));
-        mc.setCorrelationKey(MessageCorrelation.BROADCAST_KEY);
+        mc.setMessagedefId(MessageCorrelationEntity.signalRefId(signalCode));
+        mc.setCorrelationKey(MessageCorrelationEntity.BROADCAST_KEY);
         mc.setLifecycle("waiting");
         mc.setStateId(DEFAULT_STATE_ACTIVE);
         mc.setCreatedAt(now);
@@ -1409,7 +1409,7 @@ public class ProcessEngine {
      *
      * Flujos:
      *   - waitForCompletion=true (default):
-     *       1. Token parent → waiting
+     *       1. TokenEntity parent → waiting
      *       2. Spawn child con parent_instance_id + parent_token_id
      *       3. Cuando child completa, notifyParentOfSubprocessCompletion reactiva
      *          el token waiting del parent y avanza al siguiente flow_element.
@@ -1425,7 +1425,7 @@ public class ProcessEngine {
      * waiting (caso wait) o ya pasó al siguiente (caso fire-and-forget).
      */
     @SuppressWarnings("unchecked")
-    private void handleSubProcess(ProcessInstance instance, Token token,
+    private void handleSubProcess(ProcessInstanceEntity instance, TokenEntity token,
                                    ProcessDefinition.FlowElement subProcess,
                                    ProcessDefinition def, UUID userId) {
         Map<String, Object> cfg = subProcess.config();
@@ -1501,7 +1501,7 @@ public class ProcessEngine {
 
         // Spawn child. Si fire-and-forget, parent_token_id=null para que
         // notifyParentOfSubprocessCompletion sepa que no hay token al cual volver.
-        ProcessInstance child;
+        ProcessInstanceEntity child;
         try {
             child = startProcessInternal(calledProcessVersionId, childPayload,
                 null /*bearer*/, instance.getTenantId(), userId,
@@ -1544,10 +1544,10 @@ public class ProcessEngine {
      * desde el child al parent, reactiva el token del parent y avanza.
      */
     @SuppressWarnings("unchecked")
-    private void notifyParentOfSubprocessCompletion(ProcessInstance child, UUID userId) {
+    private void notifyParentOfSubprocessCompletion(ProcessInstanceEntity child, UUID userId) {
         UUID parentInstanceId = child.getParentInstanceId();
         UUID parentTokenId    = child.getParentTokenId();
-        ProcessInstance parent = instanceRepo.findById(parentInstanceId).orElse(null);
+        ProcessInstanceEntity parent = instanceRepo.findById(parentInstanceId).orElse(null);
         if (parent == null) {
             log.warn("notifyParent: parent instance {} not found", parentInstanceId);
             return;
@@ -1557,7 +1557,7 @@ public class ProcessEngine {
                 parent.getId(), parent.getLifecycle());
             return;
         }
-        Token parentToken = tokenRepo.findById(parentTokenId).orElse(null);
+        TokenEntity parentToken = tokenRepo.findById(parentTokenId).orElse(null);
         if (parentToken == null || !"waiting".equals(parentToken.getLifecycle())) {
             log.warn("notifyParent: parent token {} gone or not waiting", parentTokenId);
             return;
@@ -1624,7 +1624,7 @@ public class ProcessEngine {
      * y avanza (no bloquea — el processdef puede tener un default).
      */
     @SuppressWarnings("unchecked")
-    private void handleBusinessRuleTask(ProcessInstance instance, Token token,
+    private void handleBusinessRuleTask(ProcessInstanceEntity instance, TokenEntity token,
                                          ProcessDefinition.FlowElement brt,
                                          ProcessDefinition def, UUID userId) {
         Map<String, Object> cfg = brt.config();
@@ -1645,7 +1645,7 @@ public class ProcessEngine {
                 brt.code(), decisionRef, e);
             audit(instance, "business_rule.load_error", brt.id(), token.getId(), userId,
                 Map.of("elementCode", brt.code(), "decisionRef", decisionRef, "error", e.getMessage()));
-            // Token waiting → admin debe intervenir
+            // TokenEntity waiting → admin debe intervenir
             token.setLifecycle("waiting");
             tokenRepo.save(token);
             return;
@@ -1714,8 +1714,8 @@ public class ProcessEngine {
      * ningún token porque el parent ya pasó al siguiente flow_element cuando
      * spawnneó al child. Útil para observabilidad/debug.
      */
-    private void auditFireAndForgetChildCompletion(ProcessInstance child, UUID userId) {
-        ProcessInstance parent = instanceRepo.findById(child.getParentInstanceId()).orElse(null);
+    private void auditFireAndForgetChildCompletion(ProcessInstanceEntity child, UUID userId) {
+        ProcessInstanceEntity parent = instanceRepo.findById(child.getParentInstanceId()).orElse(null);
         if (parent == null) {
             log.debug("auditFireAndForget: parent {} gone", child.getParentInstanceId());
             return;
@@ -1740,9 +1740,9 @@ public class ProcessEngine {
                                  Map<String, Object> payload) {
         if (messageCode == null || messageCode.isBlank()) return 0;
         tenantSession.applyToCurrentTransaction();
-        UUID msgRefId = MessageCorrelation.messageRefId(messageCode);
+        UUID msgRefId = MessageCorrelationEntity.messageRefId(messageCode);
 
-        List<MessageCorrelation> matches = msgCorrRepo
+        List<MessageCorrelationEntity> matches = msgCorrRepo
             .findByMessagedefIdAndCorrelationKeyAndLifecycle(msgRefId, correlationKey, "waiting");
 
         // Fallback: si no hubo match exacto, buscamos correlations con wildcard "*"
@@ -1758,7 +1758,7 @@ public class ProcessEngine {
         }
 
         // Reactivar SOLO el primero (semántica point-to-point típica)
-        MessageCorrelation mc = matches.get(0);
+        MessageCorrelationEntity mc = matches.get(0);
         return advanceFromCorrelation(mc, payload, "message.received") ? 1 : 0;
     }
 
@@ -1770,15 +1770,15 @@ public class ProcessEngine {
     public int broadcastSignal(String signalCode, Map<String, Object> payload) {
         if (signalCode == null || signalCode.isBlank()) return 0;
         tenantSession.applyToCurrentTransaction();
-        UUID sigRefId = MessageCorrelation.signalRefId(signalCode);
-        List<MessageCorrelation> matches = msgCorrRepo
+        UUID sigRefId = MessageCorrelationEntity.signalRefId(signalCode);
+        List<MessageCorrelationEntity> matches = msgCorrRepo
             .findByMessagedefIdAndLifecycle(sigRefId, "waiting");
         if (matches.isEmpty()) {
             log.info("broadcastSignal: no listener for signalCode={}", signalCode);
             return 0;
         }
         int reactivated = 0;
-        for (MessageCorrelation mc : matches) {
+        for (MessageCorrelationEntity mc : matches) {
             if (advanceFromCorrelation(mc, payload, "signal.received")) reactivated++;
         }
         log.info("broadcastSignal: signalCode={} reactivated {}/{}",
@@ -1790,7 +1790,7 @@ public class ProcessEngine {
      * Helper: marca correlation matched, merge payload en variables, reactiva
      * token y avanza al siguiente. Idempotente vía chequeo de lifecycle.
      */
-    private boolean advanceFromCorrelation(MessageCorrelation mc,
+    private boolean advanceFromCorrelation(MessageCorrelationEntity mc,
                                             Map<String, Object> payload,
                                             String auditEvent) {
         OffsetDateTime now = OffsetDateTime.now();
@@ -1800,7 +1800,7 @@ public class ProcessEngine {
         mc.setUpdatedAt(now);
         msgCorrRepo.save(mc);
 
-        ProcessInstance instance = instanceRepo.findById(mc.getProcessinstanceId()).orElse(null);
+        ProcessInstanceEntity instance = instanceRepo.findById(mc.getProcessinstanceId()).orElse(null);
         if (instance == null) {
             log.warn("advanceFromCorrelation: instance gone for correlation {}", mc.getId());
             return false;
@@ -1810,7 +1810,7 @@ public class ProcessEngine {
                 instance.getId(), instance.getLifecycle());
             return false;
         }
-        Token token = tokenRepo.findById(mc.getTokenId()).orElse(null);
+        TokenEntity token = tokenRepo.findById(mc.getTokenId()).orElse(null);
         if (token == null || !"waiting".equals(token.getLifecycle())) {
             log.warn("advanceFromCorrelation: token gone or not waiting (id={})", mc.getTokenId());
             return false;
@@ -1892,7 +1892,7 @@ public class ProcessEngine {
         // RLS filtra el job y devuelve null pese a que existe.
         tenantSession.applyToCurrentTransaction();
 
-        JobExecutor job = jobRepo.findById(jobId).orElse(null);
+        JobExecutorEntity job = jobRepo.findById(jobId).orElse(null);
         if (job == null) {
             log.warn("fireTimerJob: job {} not found", jobId);
             return;
@@ -1913,7 +1913,7 @@ public class ProcessEngine {
         }
 
         try {
-            ProcessInstance instance = instanceRepo.findById(job.getProcessinstanceId()).orElse(null);
+            ProcessInstanceEntity instance = instanceRepo.findById(job.getProcessinstanceId()).orElse(null);
             if (instance == null) {
                 throw new IllegalStateException("Process instance gone: " + job.getProcessinstanceId());
             }
@@ -1926,7 +1926,7 @@ public class ProcessEngine {
                 jobRepo.save(job);
                 return;
             }
-            Token token = tokenRepo.findById(job.getTokenId()).orElse(null);
+            TokenEntity token = tokenRepo.findById(job.getTokenId()).orElse(null);
             if (token == null || !"waiting".equals(token.getLifecycle())) {
                 log.warn("fireTimerJob: token {} gone or no longer waiting — cancel job",
                     job.getTokenId());
@@ -1974,7 +1974,7 @@ public class ProcessEngine {
     }
 
     /** Flow normal del timer event (A2 intermediate_event). */
-    private void fireIntermediateTimer(ProcessInstance instance, Token token, JobExecutor job) {
+    private void fireIntermediateTimer(ProcessInstanceEntity instance, TokenEntity token, JobExecutorEntity job) {
         OffsetDateTime now = OffsetDateTime.now();
         token.setLifecycle("active");
         token.setUpdatedAt(now);
@@ -1998,7 +1998,7 @@ public class ProcessEngine {
      * Pasos:
      *   1. Cancelar OTRAS boundary jobs del mismo token (siempre, para no
      *      duplicar disparos si había varios timers adjuntos al mismo activity)
-     *   2. Si interrupting=true: cancelar TaskInstance + consumir activity token
+     *   2. Si interrupting=true: cancelar TaskInstanceEntity + consumir activity token
      *   3. Crear NUEVO token activo en el outgoing del boundary
      *   4. Avanzar el nuevo token
      *
@@ -2008,7 +2008,7 @@ public class ProcessEngine {
      * habría que modelar el boundary como timer cíclico (futuro).
      */
     @SuppressWarnings("unchecked")
-    private void fireBoundaryTimer(ProcessInstance instance, Token activityToken, JobExecutor job) {
+    private void fireBoundaryTimer(ProcessInstanceEntity instance, TokenEntity activityToken, JobExecutorEntity job) {
         Map<String, Object> cfg = job.getConfig();
         boolean interrupting = !(Boolean.FALSE.equals(cfg.get("interrupting")));
         UUID boundaryElementId = UUID.fromString((String) cfg.get("boundaryElementId"));
@@ -2027,13 +2027,13 @@ public class ProcessEngine {
     /**
      * Lógica unificada del disparo de un boundary_event (timer OR error/escalation).
      * - Cancela siblings boundary jobs del activity token (para que no dupliquen)
-     * - Si interrupting: cancela TaskInstance + consumes activity token
+     * - Si interrupting: cancela TaskInstanceEntity + consumes activity token
      * - Crea nuevo token en outgoing del boundary y lo avanza
      *
      * @param selfJobIdToSkip id del job que dispara actualmente (null si no aplica,
      *                         como en error boundary que no viene de un job).
      */
-    private void fireBoundaryHandler(ProcessInstance instance, Token activityToken,
+    private void fireBoundaryHandler(ProcessInstanceEntity instance, TokenEntity activityToken,
                                       UUID boundaryElementId, String boundaryCode,
                                       String attachedToCode, UUID attachedTaskId,
                                       boolean interrupting, UUID selfJobIdToSkip,
@@ -2046,8 +2046,8 @@ public class ProcessEngine {
         //    boundaries deben seguir armados).
         int cancelledSiblings = 0;
         if (interrupting) {
-            List<JobExecutor> siblings = jobRepo.findByTokenIdAndLifecycle(activityToken.getId(), "scheduled");
-            for (JobExecutor sib : siblings) {
+            List<JobExecutorEntity> siblings = jobRepo.findByTokenIdAndLifecycle(activityToken.getId(), "scheduled");
+            for (JobExecutorEntity sib : siblings) {
                 if (selfJobIdToSkip != null && Objects.equals(sib.getId(), selfJobIdToSkip)) continue;
                 Object boundaryFlag = sib.getConfig() == null ? null : sib.getConfig().get("boundary");
                 if (!Boolean.TRUE.equals(boundaryFlag)) continue;
@@ -2058,7 +2058,7 @@ public class ProcessEngine {
             }
         }
 
-        // 2. Si interrupting: cancelar TaskInstance + consumir activity token
+        // 2. Si interrupting: cancelar TaskInstanceEntity + consumir activity token
         if (interrupting) {
             if (attachedTaskId != null) {
                 taskRepo.findById(attachedTaskId).ifPresent(t -> {
@@ -2096,7 +2096,7 @@ public class ProcessEngine {
         }
         // El boundary token hereda el parent_token_id del activity (mantiene scope
         // de paralelismo si la activity vivía dentro de un SPLIT).
-        Token boundaryToken = newToken(instance, outgoing.get(0).targetId(), activityToken.getParentTokenId());
+        TokenEntity boundaryToken = newToken(instance, outgoing.get(0).targetId(), activityToken.getParentTokenId());
         tokenRepo.save(boundaryToken);
         ProcessDefinition.FlowElement target = def.findElementById(outgoing.get(0).targetId());
         audit(instance, "token.entered", outgoing.get(0).targetId(), boundaryToken.getId(), null, Map.of(
@@ -2129,9 +2129,9 @@ public class ProcessEngine {
     // Helpers — variables, audit, factories
     // ════════════════════════════════════════════════════════════════════════
 
-    private void setVariable(ProcessInstance instance, String name, Object value) {
-        Variable var = varRepo.findByProcessinstanceIdAndVarName(instance.getId(), name)
-            .orElseGet(Variable::new);
+    private void setVariable(ProcessInstanceEntity instance, String name, Object value) {
+        VariableEntity var = varRepo.findByProcessinstanceIdAndVarName(instance.getId(), name)
+            .orElseGet(VariableEntity::new);
         OffsetDateTime now = OffsetDateTime.now();
         if (var.getId() == null) {
             var.setId(UUID.randomUUID());
@@ -2178,9 +2178,9 @@ public class ProcessEngine {
         return "string";
     }
 
-    private Map<String, Object> currentVariablesAsMap(ProcessInstance instance) {
+    private Map<String, Object> currentVariablesAsMap(ProcessInstanceEntity instance) {
         Map<String, Object> out = new LinkedHashMap<>();
-        for (Variable v : varRepo.findByProcessinstanceId(instance.getId())) {
+        for (VariableEntity v : varRepo.findByProcessinstanceId(instance.getId())) {
             out.put(v.getVarName(), parseVarValue(v.getVarValue(), v.getVarType()));
         }
         return out;
@@ -2205,9 +2205,9 @@ public class ProcessEngine {
         };
     }
 
-    private void audit(ProcessInstance instance, String eventType, UUID flowElementId,
+    private void audit(ProcessInstanceEntity instance, String eventType, UUID flowElementId,
                        UUID tokenId, UUID userId, Map<String, Object> data) {
-        AuditLog al = new AuditLog();
+        AuditLogEntity al = new AuditLogEntity();
         OffsetDateTime now = OffsetDateTime.now();
         al.setId(UUID.randomUUID());
         al.setTenantId(instance.getTenantId());
@@ -2232,7 +2232,7 @@ public class ProcessEngine {
      * Whitelist de event types que se publican via SSE. NO publica todos para
      * evitar ruido (audit log tiene ~30 event types, frontend solo necesita 5).
      */
-    private void publishSseEvent(ProcessInstance instance, String eventType,
+    private void publishSseEvent(ProcessInstanceEntity instance, String eventType,
                                   Map<String, Object> data, OffsetDateTime ts) {
         String sseEvent = switch (eventType) {
             case "token.entered"    -> "bpm.token.entered";
@@ -2273,8 +2273,8 @@ public class ProcessEngine {
         }
     }
 
-    private ProcessInstance newInstance(ProcessDefinition def, UUID tenantId, UUID userId) {
-        ProcessInstance instance = new ProcessInstance();
+    private ProcessInstanceEntity newInstance(ProcessDefinition def, UUID tenantId, UUID userId) {
+        ProcessInstanceEntity instance = new ProcessInstanceEntity();
         OffsetDateTime now = OffsetDateTime.now();
         instance.setId(UUID.randomUUID());
         instance.setTenantId(tenantId);
@@ -2290,8 +2290,8 @@ public class ProcessEngine {
         return instance;
     }
 
-    private Token newToken(ProcessInstance instance, UUID elementId, UUID parentTokenId) {
-        Token token = new Token();
+    private TokenEntity newToken(ProcessInstanceEntity instance, UUID elementId, UUID parentTokenId) {
+        TokenEntity token = new TokenEntity();
         OffsetDateTime now = OffsetDateTime.now();
         token.setId(UUID.randomUUID());
         token.setTenantId(instance.getTenantId());

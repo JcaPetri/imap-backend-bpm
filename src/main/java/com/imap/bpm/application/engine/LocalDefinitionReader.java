@@ -75,24 +75,24 @@ public class LocalDefinitionReader {
 
     /** Construye la ProcessDefinition de un processversion, o null si no existe. */
     public ProcessDefinition loadProcessDefinition(UUID processVersionId) {
-        Processversion pv = processversionRepo.findById(processVersionId).orElse(null);
+        ProcessversionEntity pv = processversionRepo.findById(processVersionId).orElse(null);
         if (pv == null) return null;
-        Processdef pd = processdefRepo.findById(pv.getProcessdefId()).orElse(null);
+        ProcessdefEntity pd = processdefRepo.findById(pv.getProcessdefId()).orElse(null);
 
-        List<Flowelement> feEntities = flowelementRepo.findByProcessversionIdOrderBySortOrder(processVersionId);
+        List<FlowelementEntity> feEntities = flowelementRepo.findByProcessversionIdOrderBySortOrder(processVersionId);
         // mapa id → code para resolver source/target de los sequence flows
         Map<UUID, String> codeById = feEntities.stream()
-            .collect(Collectors.toMap(Flowelement::getId, Flowelement::getElementCode, (a, b) -> a));
+            .collect(Collectors.toMap(FlowelementEntity::getId, FlowelementEntity::getElementCode, (a, b) -> a));
 
         List<ProcessDefinition.FlowElement> flowElements = new ArrayList<>();
-        for (Flowelement fe : feEntities) {
+        for (FlowelementEntity fe : feEntities) {
             flowElements.add(new ProcessDefinition.FlowElement(
                 fe.getId(), fe.getElementCode(), fe.getElementType(), fe.getName(),
                 parseMap(fe.getConfig()), fe.getSortOrder() == null ? Integer.MAX_VALUE : fe.getSortOrder()));
         }
 
         List<ProcessDefinition.SequenceFlow> sequenceFlows = new ArrayList<>();
-        for (Sequenceflow sf : sequenceflowRepo.findByProcessversionIdOrderBySortOrder(processVersionId)) {
+        for (SequenceflowEntity sf : sequenceflowRepo.findByProcessversionIdOrderBySortOrder(processVersionId)) {
             sequenceFlows.add(new ProcessDefinition.SequenceFlow(
                 sf.getId(), sf.getSourceId(), sf.getTargetId(),
                 codeById.get(sf.getSourceId()), codeById.get(sf.getTargetId()),
@@ -102,7 +102,7 @@ public class LocalDefinitionReader {
         List<UUID> feIds = new ArrayList<>(codeById.keySet());
         List<ProcessDefinition.TaskForm> taskForms = new ArrayList<>();
         if (!feIds.isEmpty()) {
-            for (Taskform tf : taskformRepo.findByFlowelementIdIn(feIds)) {
+            for (TaskformEntity tf : taskformRepo.findByFlowelementIdIn(feIds)) {
                 // entityDefCode vive en system (cross-service) → null local; el engine lo tolera.
                 taskForms.add(new ProcessDefinition.TaskForm(
                     tf.getFlowelementId(), codeById.get(tf.getFlowelementId()),
@@ -124,13 +124,13 @@ public class LocalDefinitionReader {
         // Resuelve por code: el decisiondef del tenant si existe, si no el de plataforma
         // (SYSTEM_TENANT). El filtro tenant_id del query no basta con solo la RLS: hay que
         // pedir explícitamente SYSTEM_TENANT (los 7 decisiondefs son de plataforma).
-        Decisiondef dd = decisiondefRepo.findByTenantIdAndCode(tenantId, code)
+        DecisiondefEntity dd = decisiondefRepo.findByTenantIdAndCode(tenantId, code)
             .or(() -> decisiondefRepo.findByTenantIdAndCode(SYSTEM_TENANT, code))
             .orElse(null);
         if (dd == null) return null;
 
         List<DecisionDefinition.Rule> rules = new ArrayList<>();
-        for (DmnRule r : dmnRuleRepo.findByDecisiondefIdOrderByPriorityAsc(dd.getId())) {
+        for (DmnRuleEntity r : dmnRuleRepo.findByDecisiondefIdOrderByPriorityAsc(dd.getId())) {
             rules.add(new DecisionDefinition.Rule(
                 r.getId(), r.getPriority() == null ? 0 : r.getPriority(),
                 parseRuleInputs(r.getInputs()), parseRuleOutputs(r.getOutputs()),

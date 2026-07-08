@@ -24,13 +24,12 @@ import java.time.OffsetDateTime;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_pro_flowelement_tbl (V015).
- * Un nodo del grafo del proceso (start/end/task/gateway/event…). `config` JSONB
- * libre (el engine espera claves como config.message.messageCode, config.boundary.attachedTo).
+ * JPA entity para bpm.bpm_pro_migrationplan_tbl (V015). Plan de migración de
+ * instancias entre dos processversions.
  */
 @Entity
-@Table(name = "bpm_pro_flowelement_tbl")
-public class Flowelement {
+@Table(name = "bpm_pro_migrationplan_tbl")
+public class MigrationplanEntity {
 
     @Id
     @Column(name = "id")
@@ -39,24 +38,30 @@ public class Flowelement {
     @Column(name = "tenant_id", nullable = false)
     private UUID tenantId;
 
-    @Column(name = "processversion_id", nullable = false)
-    private UUID processversionId;
+    @Column(name = "code", nullable = false)
+    private String code;
 
-    @Column(name = "element_code", nullable = false)
-    private String elementCode;
+    @Column(name = "description")
+    private String description;
 
-    @Column(name = "element_type", nullable = false, length = 40)
-    private String elementType;
+    @Column(name = "source_processversion_id", nullable = false)
+    private UUID sourceProcessversionId;
 
-    @Column(name = "name")
-    private String name;
+    @Column(name = "target_processversion_id", nullable = false)
+    private UUID targetProcessversionId;
+
+    @Column(name = "status", nullable = false, length = 20)
+    private String status;
+
+    @Column(name = "applied_at")
+    private OffsetDateTime appliedAt;
+
+    @Column(name = "applied_by")
+    private UUID appliedBy;
 
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "config")
-    private String config;
-
-    @Column(name = "sort_order")
-    private Integer sortOrder;
+    @Column(name = "stats")
+    private String stats;
 
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
@@ -80,18 +85,22 @@ public class Flowelement {
     public void setId(UUID id) { this.id = id; }
     public UUID getTenantId() { return tenantId; }
     public void setTenantId(UUID tenantId) { this.tenantId = tenantId; }
-    public UUID getProcessversionId() { return processversionId; }
-    public void setProcessversionId(UUID processversionId) { this.processversionId = processversionId; }
-    public String getElementCode() { return elementCode; }
-    public void setElementCode(String elementCode) { this.elementCode = elementCode; }
-    public String getElementType() { return elementType; }
-    public void setElementType(String elementType) { this.elementType = elementType; }
-    public String getName() { return name; }
-    public void setName(String name) { this.name = name; }
-    public String getConfig() { return config; }
-    public void setConfig(String config) { this.config = config; }
-    public Integer getSortOrder() { return sortOrder; }
-    public void setSortOrder(Integer sortOrder) { this.sortOrder = sortOrder; }
+    public String getCode() { return code; }
+    public void setCode(String code) { this.code = code; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+    public UUID getSourceProcessversionId() { return sourceProcessversionId; }
+    public void setSourceProcessversionId(UUID sourceProcessversionId) { this.sourceProcessversionId = sourceProcessversionId; }
+    public UUID getTargetProcessversionId() { return targetProcessversionId; }
+    public void setTargetProcessversionId(UUID targetProcessversionId) { this.targetProcessversionId = targetProcessversionId; }
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    public OffsetDateTime getAppliedAt() { return appliedAt; }
+    public void setAppliedAt(OffsetDateTime appliedAt) { this.appliedAt = appliedAt; }
+    public UUID getAppliedBy() { return appliedBy; }
+    public void setAppliedBy(UUID appliedBy) { this.appliedBy = appliedBy; }
+    public String getStats() { return stats; }
+    public void setStats(String stats) { this.stats = stats; }
     public UUID getStateId() { return stateId; }
     public void setStateId(UUID stateId) { this.stateId = stateId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }

@@ -18,8 +18,8 @@
 package com.imap.bpm.infrastructure;
 
 import com.imap.bpm.application.workhub.WorkHubConfigService;
-import com.imap.bpm.infrastructure.entity.WhbClassification;
-import com.imap.bpm.infrastructure.entity.WhbTenantConfig;
+import com.imap.bpm.infrastructure.entity.WhbClassificationEntity;
+import com.imap.bpm.infrastructure.entity.WhbTenantConfigEntity;
 import com.imap.eav.engine.context.EavTenantSession;
 import com.imap.platform.security.UserContext;
 import com.imap.platform.security.UserContextHolder;
@@ -59,7 +59,7 @@ public class WorkHubAdminController {
     @Transactional(readOnly = true)
     public Map<String, Object> getConfig() {
         tenantSession.applyToCurrentTransaction();
-        WhbTenantConfig c = svc.getConfig(TenantContextHolder.get());
+        WhbTenantConfigEntity c = svc.getConfig(TenantContextHolder.get());
         return c == null ? defaultConfigMap() : toConfigMap(c);
     }
 
@@ -96,7 +96,7 @@ public class WorkHubAdminController {
             return badRequest("invalid_thresholds", "El umbral alto debe ser ≥ al medio.");
         }
 
-        WhbTenantConfig c = svc.upsertConfig(tenantId, userId, mode, wg, wu, wt, high, medium);
+        WhbTenantConfigEntity c = svc.upsertConfig(tenantId, userId, mode, wg, wu, wt, high, medium);
         return ResponseEntity.ok(toConfigMap(c));
     }
 
@@ -107,7 +107,7 @@ public class WorkHubAdminController {
     public List<Map<String, Object>> listClassifications() {
         tenantSession.applyToCurrentTransaction();
         List<Map<String, Object>> out = new ArrayList<>();
-        for (WhbClassification c : svc.listClassifications(TenantContextHolder.get())) {
+        for (WhbClassificationEntity c : svc.listClassifications(TenantContextHolder.get())) {
             out.add(toClassMap(c));
         }
         return out;
@@ -140,7 +140,7 @@ public class WorkHubAdminController {
             return badRequest("out_of_range", "Gravedad/Urgencia/Tendencia deben estar entre 1 y 10.");
         }
 
-        WhbClassification c = svc.upsertClassification(
+        WhbClassificationEntity c = svc.upsertClassification(
             tenantId, userId, processdefId, flowelementId, gravity, urgency, trend);
         return ResponseEntity.ok(toClassMap(c));
     }
@@ -152,7 +152,7 @@ public class WorkHubAdminController {
         return u != null ? u.userId() : null;
     }
 
-    private static Map<String, Object> toConfigMap(WhbTenantConfig c) {
+    private static Map<String, Object> toConfigMap(WhbTenantConfigEntity c) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("tenantId", c.getTenantId() == null ? null : c.getTenantId().toString());
         m.put("aggregationMode", c.getAggregationMode());
@@ -177,7 +177,7 @@ public class WorkHubAdminController {
         return m;
     }
 
-    private static Map<String, Object> toClassMap(WhbClassification c) {
+    private static Map<String, Object> toClassMap(WhbClassificationEntity c) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", c.getId() == null ? null : c.getId().toString());
         m.put("processdefId", c.getProcessdefId() == null ? null : c.getProcessdefId().toString());

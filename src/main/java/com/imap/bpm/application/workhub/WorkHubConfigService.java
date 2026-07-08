@@ -16,8 +16,8 @@
 
 package com.imap.bpm.application.workhub;
 
-import com.imap.bpm.infrastructure.entity.WhbClassification;
-import com.imap.bpm.infrastructure.entity.WhbTenantConfig;
+import com.imap.bpm.infrastructure.entity.WhbClassificationEntity;
+import com.imap.bpm.infrastructure.entity.WhbTenantConfigEntity;
 import com.imap.bpm.infrastructure.repository.WhbClassificationRepository;
 import com.imap.bpm.infrastructure.repository.WhbTenantConfigRepository;
 import org.springframework.stereotype.Service;
@@ -50,17 +50,17 @@ public class WorkHubConfigService {
         this.classRepo = classRepo;
     }
 
-    public WhbTenantConfig getConfig(UUID tenantId) {
+    public WhbTenantConfigEntity getConfig(UUID tenantId) {
         return configRepo.findByTenantId(tenantId).orElse(null);
     }
 
     @Transactional
-    public WhbTenantConfig upsertConfig(UUID tenantId, UUID userId, String mode,
+    public WhbTenantConfigEntity upsertConfig(UUID tenantId, UUID userId, String mode,
                                         BigDecimal wg, BigDecimal wu, BigDecimal wt,
                                         BigDecimal highPct, BigDecimal mediumPct) {
         OffsetDateTime now = OffsetDateTime.now();
-        WhbTenantConfig c = configRepo.findByTenantId(tenantId).orElseGet(() -> {
-            WhbTenantConfig n = new WhbTenantConfig();
+        WhbTenantConfigEntity c = configRepo.findByTenantId(tenantId).orElseGet(() -> {
+            WhbTenantConfigEntity n = new WhbTenantConfigEntity();
             n.setId(UUID.randomUUID());
             n.setTenantId(tenantId);
             n.setStateId(DEFAULT_STATE_ACTIVE);
@@ -79,23 +79,23 @@ public class WorkHubConfigService {
         return configRepo.save(c);
     }
 
-    public List<WhbClassification> listClassifications(UUID tenantId) {
+    public List<WhbClassificationEntity> listClassifications(UUID tenantId) {
         return classRepo.findByTenantIdAndProcessversionIdIsNull(tenantId);
     }
 
     @Transactional
-    public WhbClassification upsertClassification(UUID tenantId, UUID userId,
+    public WhbClassificationEntity upsertClassification(UUID tenantId, UUID userId,
                                                   UUID processdefId, UUID flowelementId,
                                                   short gravity, short urgency, short trend) {
         OffsetDateTime now = OffsetDateTime.now();
-        Optional<WhbClassification> existing = (flowelementId != null)
+        Optional<WhbClassificationEntity> existing = (flowelementId != null)
             ? classRepo.findByTenantIdAndProcessdefIdAndFlowelementIdAndProcessversionIdIsNull(
                 tenantId, processdefId, flowelementId)
             : classRepo.findByTenantIdAndProcessdefIdAndFlowelementIdIsNullAndProcessversionIdIsNull(
                 tenantId, processdefId);
 
-        WhbClassification c = existing.orElseGet(() -> {
-            WhbClassification n = new WhbClassification();
+        WhbClassificationEntity c = existing.orElseGet(() -> {
+            WhbClassificationEntity n = new WhbClassificationEntity();
             n.setId(UUID.randomUUID());
             n.setTenantId(tenantId);
             n.setProcessdefId(processdefId);

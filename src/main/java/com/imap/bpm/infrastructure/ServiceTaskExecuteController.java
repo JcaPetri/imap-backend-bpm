@@ -48,7 +48,7 @@ import java.util.Map;
  *
  * NOTA: este endpoint NO crea processinstances ni invoca el motor. Solo dispatcha
  * el handler local correspondiente al serviceCode. Si el handler necesita acceso
- * a la entity {@link com.imap.bpm.infrastructure.entity.ProcessInstance} completa,
+ * a la entity {@link com.imap.bpm.infrastructure.entity.ProcessInstanceEntity} completa,
  * tiene que consultarla via repository — el body solo trae IDs por simplicidad.
  */
 @RestController

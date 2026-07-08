@@ -32,7 +32,7 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "bpm_pro_token_tbl")
-public class Token {
+public class TokenEntity {
 
     @Id
     @Column(name = "id")
@@ -63,7 +63,7 @@ public class Token {
     @Column(name = "updated_by_id")                     private UUID updatedById;
     @Column(name = "owned_by_id", updatable = false)                       private UUID ownedById;
 
-    public Token() {}
+    public TokenEntity() {}
 
     public UUID getId()                       { return id; }
     public void setId(UUID id)                { this.id = id; }

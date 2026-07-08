@@ -26,12 +26,12 @@ import java.util.UUID;
  *
  * Cada row representa un startEvent de un processversion suscrito a un message
  * code. Cuando llega un POST /v1/bpm/messages/start con ese messageCode, el
- * motor BPM arranca una nueva ProcessInstance por cada subscription activa
+ * motor BPM arranca una nueva ProcessInstanceEntity por cada subscription activa
  * matching del tenant.
  *
- * Diferencia con MessageCorrelation:
- *   - MessageCorrelation: despierta tokens existentes (intermediate events)
- *   - MessageStartSubscription: arranca NEW instances (start events)
+ * Diferencia con MessageCorrelationEntity:
+ *   - MessageCorrelationEntity: despierta tokens existentes (intermediate events)
+ *   - MessageStartSubscriptionEntity: arranca NEW instances (start events)
  *
  * Populada por ProcessDefinitionLoader al cargar un processdef con startEvents
  * que tienen config.message.messageCode. Idempotente (UPSERT por unique constraint).
@@ -41,7 +41,7 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "bpm_pro_message_start_subscription_tbl")
-public class MessageStartSubscription {
+public class MessageStartSubscriptionEntity {
 
     @Id @Column(name = "id")                                          private UUID id;
     @Column(name = "tenant_id", nullable = false)                     private UUID tenantId;
@@ -58,7 +58,7 @@ public class MessageStartSubscription {
     @Column(name = "updated_by_id")                                   private UUID updatedById;
     @Column(name = "owned_by_id", updatable = false)                                     private UUID ownedById;
 
-    public MessageStartSubscription() {}
+    public MessageStartSubscriptionEntity() {}
 
     // ─── Getters/setters ──────────────────────────────────────────────────────
 

@@ -25,33 +25,26 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * JPA entity para bpm.bpm_hum_taskinstance_tbl. Tarea humana asignada.
+ * JPA entity para bpm.bpm_pro_auditlog_tbl. Log de eventos del proceso.
  */
 @Entity
-@Table(name = "bpm_hum_taskinstance_tbl")
-public class TaskInstance {
+@Table(name = "bpm_pro_auditlog_tbl")
+public class AuditLogEntity {
 
     @Id @Column(name = "id")                                 private UUID id;
     @Column(name = "tenant_id", nullable = false)            private UUID tenantId;
     @Column(name = "processinstance_id", nullable = false)   private UUID processinstanceId;
-    @Column(name = "flowelement_id", nullable = false)       private UUID flowelementId;
+    @Column(name = "event_type", nullable = false, length = 50) private String eventType;
+    @Column(name = "flowelement_id")                          private UUID flowelementId;
     @Column(name = "token_id")                                private UUID tokenId;
-    @Column(name = "lifecycle", nullable = false, length = 20) private String lifecycle;
-    @Column(name = "assigned_user_id")                       private UUID assignedUserId;
-    @Column(name = "assigned_role", length = 100)            private String assignedRole;
-    @Column(name = "priority", nullable = false)             private Integer priority;
-    @Column(name = "due_at")                                 private OffsetDateTime dueAt;
-    @Column(name = "assigned_at")                            private OffsetDateTime assignedAt;
-    @Column(name = "started_at")                             private OffsetDateTime startedAt;
-    @Column(name = "completed_at")                           private OffsetDateTime completedAt;
+    @Column(name = "user_id")                                 private UUID userId;
+    @Column(name = "occurred_at", nullable = false)         private OffsetDateTime occurredAt;
 
     @Type(JsonBinaryType.class)
-    @Column(name = "input_data_jsonb", columnDefinition = "jsonb")
-    private Map<String, Object> inputData;
+    @Column(name = "data_jsonb", columnDefinition = "jsonb")
+    private Map<String, Object> data;
 
-    @Type(JsonBinaryType.class)
-    @Column(name = "output_data_jsonb", columnDefinition = "jsonb")
-    private Map<String, Object> outputData;
+    @Column(name = "correlation_id", length = 100)            private String correlationId;
 
     @Column(name = "state_id", nullable = false)             private UUID stateId;
     @Column(name = "created_at", nullable = false, updatable = false)           private OffsetDateTime createdAt;
@@ -60,7 +53,7 @@ public class TaskInstance {
     @Column(name = "updated_by_id")                          private UUID updatedById;
     @Column(name = "owned_by_id", updatable = false)                            private UUID ownedById;
 
-    public TaskInstance() {}
+    public AuditLogEntity() {}
 
     public UUID getId()                       { return id; }
     public void setId(UUID id)                { this.id = id; }
@@ -68,30 +61,20 @@ public class TaskInstance {
     public void setTenantId(UUID id)          { this.tenantId = id; }
     public UUID getProcessinstanceId()        { return processinstanceId; }
     public void setProcessinstanceId(UUID id) { this.processinstanceId = id; }
+    public String getEventType()              { return eventType; }
+    public void setEventType(String s)        { this.eventType = s; }
     public UUID getFlowelementId()            { return flowelementId; }
     public void setFlowelementId(UUID id)     { this.flowelementId = id; }
     public UUID getTokenId()                  { return tokenId; }
     public void setTokenId(UUID id)           { this.tokenId = id; }
-    public String getLifecycle()              { return lifecycle; }
-    public void setLifecycle(String s)        { this.lifecycle = s; }
-    public UUID getAssignedUserId()           { return assignedUserId; }
-    public void setAssignedUserId(UUID id)    { this.assignedUserId = id; }
-    public String getAssignedRole()           { return assignedRole; }
-    public void setAssignedRole(String s)     { this.assignedRole = s; }
-    public Integer getPriority()              { return priority; }
-    public void setPriority(Integer p)        { this.priority = p; }
-    public OffsetDateTime getDueAt()          { return dueAt; }
-    public void setDueAt(OffsetDateTime t)    { this.dueAt = t; }
-    public OffsetDateTime getAssignedAt()     { return assignedAt; }
-    public void setAssignedAt(OffsetDateTime t) { this.assignedAt = t; }
-    public OffsetDateTime getStartedAt()      { return startedAt; }
-    public void setStartedAt(OffsetDateTime t){ this.startedAt = t; }
-    public OffsetDateTime getCompletedAt()    { return completedAt; }
-    public void setCompletedAt(OffsetDateTime t) { this.completedAt = t; }
-    public Map<String, Object> getInputData() { return inputData; }
-    public void setInputData(Map<String, Object> m) { this.inputData = m; }
-    public Map<String, Object> getOutputData(){ return outputData; }
-    public void setOutputData(Map<String, Object> m) { this.outputData = m; }
+    public UUID getUserId()                   { return userId; }
+    public void setUserId(UUID id)            { this.userId = id; }
+    public OffsetDateTime getOccurredAt()     { return occurredAt; }
+    public void setOccurredAt(OffsetDateTime t) { this.occurredAt = t; }
+    public Map<String, Object> getData()      { return data; }
+    public void setData(Map<String, Object> m){ this.data = m; }
+    public String getCorrelationId()          { return correlationId; }
+    public void setCorrelationId(String s)    { this.correlationId = s; }
 
     public UUID getStateId()                  { return stateId; }
     public void setStateId(UUID id)           { this.stateId = id; }

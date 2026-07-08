@@ -19,9 +19,9 @@ package com.imap.bpm.application.engine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.application.MigrationPlanManagementService;
 import com.imap.bpm.domain.dto.MigrationPlanDto;
-import com.imap.bpm.infrastructure.entity.AuditLog;
-import com.imap.bpm.infrastructure.entity.ProcessInstance;
-import com.imap.bpm.infrastructure.entity.Token;
+import com.imap.bpm.infrastructure.entity.AuditLogEntity;
+import com.imap.bpm.infrastructure.entity.ProcessInstanceEntity;
+import com.imap.bpm.infrastructure.entity.TokenEntity;
 import com.imap.bpm.infrastructure.repository.AuditLogRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.TokenRepository;
@@ -161,7 +161,7 @@ public class MigrationApplyService {
         }
 
         // 5. Loop instances vivas en source (RLS-filtered al tenant del caller)
-        List<ProcessInstance> instances = instanceRepo.findByProcessversionIdAndLifecycle(
+        List<ProcessInstanceEntity> instances = instanceRepo.findByProcessversionIdAndLifecycle(
             sourcePvId, "active");
 
         int instancesAffected = 0;
@@ -171,12 +171,12 @@ public class MigrationApplyService {
         List<String> warnings = new ArrayList<>();
         OffsetDateTime now = OffsetDateTime.now();
 
-        for (ProcessInstance inst : instances) {
+        for (ProcessInstanceEntity inst : instances) {
             try {
-                List<Token> tokens = tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+                List<TokenEntity> tokens = tokenRepo.findByProcessinstanceIdAndLifecycleIn(
                     inst.getId(), List.of("active", "waiting"));
 
-                for (Token tk : tokens) {
+                for (TokenEntity tk : tokens) {
                     String currentCode = sourceIdToCode.get(tk.getCurrentElementId());
                     if (currentCode == null) {
                         warnings.add("Instance " + inst.getId() + " token " + tk.getId()
@@ -236,7 +236,7 @@ public class MigrationApplyService {
 
                 // Audit — usa el patrón JPA standard (mismo que ProcessEngine.audit())
                 // para evitar mismatches con columnas/Hibernate type handlers.
-                AuditLog al = new AuditLog();
+                AuditLogEntity al = new AuditLogEntity();
                 al.setId(UUID.randomUUID());
                 al.setTenantId(inst.getTenantId());
                 al.setProcessinstanceId(inst.getId());

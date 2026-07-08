@@ -34,7 +34,7 @@ import java.util.UUID;
  */
 @Entity
 @Table(name = "bpm_pro_processinstance_tbl")
-public class ProcessInstance {
+public class ProcessInstanceEntity {
 
     @Id
     @Column(name = "id")
@@ -80,7 +80,7 @@ public class ProcessInstance {
     @Column(name = "owned_by_id", updatable = false)                       private UUID ownedById;
 
     // ── Constructors ─────────────────────────────────────────────────────────
-    public ProcessInstance() {}
+    public ProcessInstanceEntity() {}
 
     // ── Getters / Setters ────────────────────────────────────────────────────
     public UUID getId()                      { return id; }
