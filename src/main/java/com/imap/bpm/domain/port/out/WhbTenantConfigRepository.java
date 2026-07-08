@@ -14,19 +14,17 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.infrastructure.repository;
+package com.imap.bpm.domain.port.out;
 
-import com.imap.bpm.infrastructure.entity.WhbTenantConfigEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
+import com.imap.bpm.domain.model.WhbTenantConfig;
 
 import java.util.Optional;
 import java.util.UUID;
 
-/**
- * Política de priorización del WorkHub por tenant (1 fila por tenant).
- * Filtro por tenant explícito (la RLS de bpm es inerte hasta el sprint RLS-bpm-wide).
- */
-public interface WhbTenantConfigRepository extends JpaRepository<WhbTenantConfigEntity, UUID> {
+/** Puerto de salida: política de priorización del WorkHub por tenant. Devuelve dominio. */
+public interface WhbTenantConfigRepository {
 
-    Optional<WhbTenantConfigEntity> findByTenantId(UUID tenantId);
+    Optional<WhbTenantConfig> findByTenantId(UUID tenantId);
+
+    WhbTenantConfig save(WhbTenantConfig config);
 }

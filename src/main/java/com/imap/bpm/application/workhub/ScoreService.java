@@ -16,10 +16,10 @@
 
 package com.imap.bpm.application.workhub;
 
-import com.imap.bpm.infrastructure.entity.WhbClassificationEntity;
-import com.imap.bpm.infrastructure.entity.WhbTenantConfigEntity;
-import com.imap.bpm.infrastructure.repository.WhbClassificationRepository;
-import com.imap.bpm.infrastructure.repository.WhbTenantConfigRepository;
+import com.imap.bpm.domain.model.WhbClassification;
+import com.imap.bpm.domain.model.WhbTenantConfig;
+import com.imap.bpm.domain.port.out.WhbClassificationRepository;
+import com.imap.bpm.domain.port.out.WhbTenantConfigRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.OffsetDateTime;
@@ -81,8 +81,8 @@ public class ScoreService {
     public TaskPriority computeAt(UUID tenantId, UUID processdefId, UUID flowelementId,
                                   OffsetDateTime dueAt, OffsetDateTime now) {
 
-        WhbTenantConfigEntity cfg = configRepo.findByTenantId(tenantId).orElse(null);
-        Optional<WhbClassificationEntity> cls = resolveClassification(tenantId, processdefId, flowelementId);
+        WhbTenantConfig cfg = configRepo.findByTenantId(tenantId).orElse(null);
+        Optional<WhbClassification> cls = resolveClassification(tenantId, processdefId, flowelementId);
 
         double pct = 0.0;
         boolean classified = cls.isPresent();
@@ -95,21 +95,19 @@ public class ScoreService {
     }
 
     // ── Resolución de clasificación: override por user_task, si no nivel processdef ──
-    private Optional<WhbClassificationEntity> resolveClassification(UUID tenantId, UUID processdefId,
+    private Optional<WhbClassification> resolveClassification(UUID tenantId, UUID processdefId,
                                                               UUID flowelementId) {
         if (flowelementId != null) {
-            Optional<WhbClassificationEntity> override = classRepo
-                .findByTenantIdAndProcessdefIdAndFlowelementIdAndProcessversionIdIsNull(
-                    tenantId, processdefId, flowelementId);
+            Optional<WhbClassification> override = classRepo
+                .findCurrentForFlowelement(tenantId, processdefId, flowelementId);
             if (override.isPresent()) return override;
         }
         return classRepo
-            .findByTenantIdAndProcessdefIdAndFlowelementIdIsNullAndProcessversionIdIsNull(
-                tenantId, processdefId);
+            .findCurrentProcessLevel(tenantId, processdefId);
     }
 
     // ── score_base / score_max · 100, según modo ──
-    private double prioridadPct(WhbClassificationEntity c, WhbTenantConfigEntity cfg) {
+    private double prioridadPct(WhbClassification c, WhbTenantConfig cfg) {
         double g = c.getGravity();
         double u = c.getUrgency();
         double t = c.getTrend();
@@ -132,7 +130,7 @@ public class ScoreService {
         return clamp(pct, 0.0, 100.0);
     }
 
-    private SemaphoreColor colorFromPct(double pct, WhbTenantConfigEntity cfg) {
+    private SemaphoreColor colorFromPct(double pct, WhbTenantConfig cfg) {
         double high   = cfg != null ? cfg.getThresholdHighPct().doubleValue()   : DEFAULT_HIGH_PCT;
         double medium = cfg != null ? cfg.getThresholdMediumPct().doubleValue() : DEFAULT_MEDIUM_PCT;
         if (pct >= high)   return SemaphoreColor.RED;

@@ -29,7 +29,7 @@ import java.util.UUID;
  * nivel current (processversion_id NULL; el snapshot por versión se difiere).
  * Filtro por tenant explícito (RLS de bpm inerte hasta el sprint RLS-bpm-wide).
  */
-public interface WhbClassificationRepository extends JpaRepository<WhbClassificationEntity, UUID> {
+public interface WhbClassificationJpaRepository extends JpaRepository<WhbClassificationEntity, UUID> {
 
     /** Clasificación a nivel processdef (current, sin versión, sin user_task). */
     Optional<WhbClassificationEntity>
