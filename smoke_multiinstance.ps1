@@ -74,7 +74,7 @@ $startedInstances = @()
 
 function Get-Instance($id) { return Invoke-RestMethod -Uri "$bpm/v1/bpm/instance/$id" -Headers $H }
 function Count-Audit($inst, $evt) {
-    return (@($inst.audit | Where-Object { $_.eventType -eq $evt })).Count
+    return (@($inst.auditLog | Where-Object { $_.eventType -eq $evt })).Count
 }
 
 # =============================================================================
@@ -89,7 +89,7 @@ $a = Get-Instance $instA.id
 $reviewTasks = @($a.tasks | Where-Object { $_.flowElementCode -eq 'review' })
 if ($reviewTasks.Count -eq 3) { OKMsg 'MI split creo 3 tasks' } else { Fail "esperaba 3 tasks, hubo $($reviewTasks.Count)" }
 if ((Count-Audit $a 'mi.split') -ge 1) { OKMsg 'audit mi.split presente' } else { Fail 'falta audit mi.split' }
-$split = @($a.audit | Where-Object { $_.eventType -eq 'mi.split' })[0]
+$split = @($a.auditLog | Where-Object { $_.eventType -eq 'mi.split' })[0]
 if ($split -and "$($split.data.cardinality)" -eq '3') { OKMsg 'mi.split cardinality=3' } else { Fail "cardinality != 3 (fue $($split.data.cardinality))" }
 if ($a.lifecycle -eq 'active') { OKMsg 'instance sigue active (ancla esperando)' } else { Fail "instance lifecycle=$($a.lifecycle), esperaba active" }
 
