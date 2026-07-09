@@ -446,6 +446,10 @@ public class ProcessEngine {
                 handleParallelGateway(instance, token, current, def, userId);
                 break;
 
+            case "event_based_gateway":
+                handleEventBasedGateway(instance, token, current, def, userId);
+                break;
+
             case "intermediate_event":
                 handleIntermediateEvent(instance, token, current, def, userId);
                 break;
@@ -1252,6 +1256,125 @@ public class ProcessEngine {
             "incoming", incoming.size(),
             "outgoing", outgoing.size()
         ));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // event_based_gateway — carrera de eventos ("esperá lo primero que pase")
+    //
+    // Al llegar el token, ARMA todas las ramas: cada outgoing apunta a un
+    // intermediate_event (timer / message / signal) que se pone en waiting. El
+    // PRIMERO que dispara gana; sus hermanos se cancelan (des-arma timers +
+    // correlations + consume tokens). Reusa el fan-out por parent_token_id del
+    // parallel_gateway y los primitivos de arme (handleIntermediateEvent) y de
+    // disparo (fireIntermediateTimer / advanceFromCorrelation).
+    //
+    // Detección de rama-de-carrera 100% ESTRUCTURAL (sin schema nuevo): un
+    // intermediate_event es rama de carrera si su source entrante es un
+    // event_based_gateway. Los hermanos comparten parent_token_id = token del
+    // gateway. Caso de uso: "esperá confirmación de pago (message) OR timeout 48h".
+    // ════════════════════════════════════════════════════════════════════════
+
+    private void handleEventBasedGateway(ProcessInstanceEntity instance, TokenEntity token,
+                                         ProcessDefinition.FlowElement gateway,
+                                         ProcessDefinition def, UUID userId) {
+        List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(gateway.id());
+        if (outgoing.isEmpty()) {
+            log.warn("event_based_gateway '{}' sin outgoing — token waiting", gateway.code());
+            token.setLifecycle("waiting");
+            tokenRepo.save(token);
+            return;
+        }
+
+        OffsetDateTime now = OffsetDateTime.now();
+        // Consume el token del gateway; cada rama es un token hijo (parent_token_id
+        // = token del gateway) → agrupa a los hermanos para la cancelación.
+        token.setLifecycle("consumed");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+        audit(instance, "event_gateway.armed", gateway.id(), token.getId(), userId, Map.of(
+            "gatewayCode", gateway.code(),
+            "branches", outgoing.size()
+        ));
+        metricInc("bpm.event_gateway.armed", def);
+
+        for (ProcessDefinition.SequenceFlow sf : outgoing) {
+            TokenEntity child = newToken(instance, sf.targetId(), token.getId());
+            tokenRepo.save(child);
+            ProcessDefinition.FlowElement target = def.findElementById(sf.targetId());
+            audit(instance, "token.entered", sf.targetId(), child.getId(), userId, Map.of(
+                "elementCode", target != null ? target.code() : "?",
+                "elementType", target != null ? target.type() : "?",
+                "fromEventGateway", gateway.code()
+            ));
+            // Arma la rama (timer/message/signal → waiting). Cada intermediate_event
+            // termina en 'waiting' hasta que su evento dispare.
+            advanceToken(instance, child, def, userId);
+        }
+    }
+
+    /**
+     * Cancela las ramas perdedoras de un event_based_gateway cuando una gana.
+     * Si `winnerEvent` es rama de carrera (su source es un event_based_gateway),
+     * consume los tokens hermanos que siguen waiting en las otras ramas y
+     * des-arma sus timers (jobs scheduled) y correlations (message/signal).
+     * No-op si el evento no es rama de carrera.
+     */
+    private int cancelEventRaceSiblings(ProcessInstanceEntity instance, TokenEntity winnerToken,
+                                        ProcessDefinition.FlowElement winnerEvent,
+                                        ProcessDefinition def, UUID userId) {
+        // ¿El source entrante del winner es un event_based_gateway?
+        ProcessDefinition.FlowElement gateway = null;
+        for (ProcessDefinition.SequenceFlow in : def.incomingFlows(winnerEvent.id())) {
+            ProcessDefinition.FlowElement src = def.findElementById(in.sourceId());
+            if (src != null && "event_based_gateway".equals(src.type())) { gateway = src; break; }
+        }
+        if (gateway == null) return 0;   // no es carrera
+
+        UUID groupParent = winnerToken.getParentTokenId();
+        OffsetDateTime now = OffsetDateTime.now();
+        int cancelled = 0;
+
+        for (ProcessDefinition.SequenceFlow sf : def.outgoingFlows(gateway.id())) {
+            if (sf.targetId().equals(winnerEvent.id())) continue;   // la rama ganadora
+            List<TokenEntity> waiters = tokenRepo.findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
+                instance.getId(), sf.targetId(), "waiting");
+            for (TokenEntity loser : waiters) {
+                // solo hermanos del mismo gateway (mismo parent_token_id)
+                if (!Objects.equals(loser.getParentTokenId(), groupParent)) continue;
+
+                // des-armar timers scheduled del loser
+                for (JobExecutorEntity job : jobRepo.findByTokenIdAndLifecycle(loser.getId(), "scheduled")) {
+                    job.setLifecycle("cancelled");
+                    job.setUpdatedAt(now);
+                    jobRepo.save(job);
+                }
+                // des-armar message/signal correlations waiting del loser
+                for (MessageCorrelationEntity mc : msgCorrRepo.findByTokenIdAndLifecycle(loser.getId(), "waiting")) {
+                    mc.setLifecycle("cancelled");
+                    mc.setUpdatedAt(now);
+                    msgCorrRepo.save(mc);
+                }
+                loser.setLifecycle("consumed");
+                loser.setUpdatedAt(now);
+                tokenRepo.save(loser);
+                ProcessDefinition.FlowElement loserEl = def.findElementById(sf.targetId());
+                audit(instance, "event_gateway.branch_cancelled", sf.targetId(), loser.getId(), userId, Map.of(
+                    "elementCode", loserEl != null ? loserEl.code() : "?",
+                    "gatewayCode", gateway.code(),
+                    "winnerCode", winnerEvent.code()
+                ));
+                cancelled++;
+            }
+        }
+        if (cancelled > 0) {
+            audit(instance, "event_gateway.resolved", gateway.id(), winnerToken.getId(), userId, Map.of(
+                "gatewayCode", gateway.code(),
+                "winnerCode", winnerEvent.code(),
+                "cancelledBranches", cancelled
+            ));
+            metricInc("bpm.event_gateway.resolved", def);
+        }
+        return cancelled;
     }
 
     // ─── intermediate_event (A2 — timer + message + signal) ─────────────────
@@ -2182,6 +2305,9 @@ public class ProcessEngine {
             "elementCode", current.code(),
             "correlationId", mc.getId().toString()
         ));
+        // Event-based gateway: si este evento era una rama de carrera, cancelar
+        // las ramas perdedoras (des-armar sus timers/correlations + consumir tokens).
+        cancelEventRaceSiblings(instance, token, current, def, null);
         consumeAndMoveToNext(instance, token, current, def, null);
         return true;
     }
@@ -2332,6 +2458,9 @@ public class ProcessEngine {
             "jobId", job.getId().toString()
         ));
         metricInc("bpm.timer.fired", instance.getProcessdefId().toString());
+        // Event-based gateway: si este timer era una rama de carrera, cancelar
+        // las ramas perdedoras antes de avanzar el ganador.
+        cancelEventRaceSiblings(instance, token, current, def, null);
         consumeAndMoveToNext(instance, token, current, def, null);
     }
 
