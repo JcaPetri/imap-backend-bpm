@@ -17,9 +17,9 @@
 
 package com.imap.bpm.infrastructure;
 
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskContext;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskRegistry;
-import com.imap.bpm.domain.engine.servicetask.ServiceTaskResult;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskContext;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskRegistry;
+import com.imap.bpm.application.engine.servicetask.ServiceTaskResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -48,7 +48,7 @@ import java.util.Map;
  *
  * NOTA: este endpoint NO crea processinstances ni invoca el motor. Solo dispatcha
  * el handler local correspondiente al serviceCode. Si el handler necesita acceso
- * a la entity {@link com.imap.bpm.infrastructure.entity.ProcessInstance} completa,
+ * a la entity {@link com.imap.bpm.infrastructure.entity.ProcessInstanceEntity} completa,
  * tiene que consultarla via repository — el body solo trae IDs por simplicidad.
  */
 @RestController

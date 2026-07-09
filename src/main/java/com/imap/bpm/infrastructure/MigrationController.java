@@ -17,7 +17,7 @@
 
 package com.imap.bpm.infrastructure;
 
-import com.imap.bpm.domain.engine.MigrationApplyService;
+import com.imap.bpm.application.engine.MigrationApplyService;
 import com.imap.platform.security.UserContext;
 import com.imap.platform.security.UserContextHolder;
 import org.springframework.http.ResponseEntity;

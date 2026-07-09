@@ -16,22 +16,22 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.ProcessInstance;
+import com.imap.bpm.infrastructure.entity.ProcessInstanceEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.UUID;
 
-public interface ProcessInstanceRepository extends JpaRepository<ProcessInstance, UUID> {
-    List<ProcessInstance> findByTenantIdAndLifecycle(UUID tenantId, String lifecycle);
-    List<ProcessInstance> findByProcessdefIdAndLifecycle(UUID processdefId, String lifecycle);
-    List<ProcessInstance> findByParentInstanceId(UUID parentInstanceId);
+public interface ProcessInstanceRepository extends JpaRepository<ProcessInstanceEntity, UUID> {
+    List<ProcessInstanceEntity> findByTenantIdAndLifecycle(UUID tenantId, String lifecycle);
+    List<ProcessInstanceEntity> findByProcessdefIdAndLifecycle(UUID processdefId, String lifecycle);
+    List<ProcessInstanceEntity> findByParentInstanceId(UUID parentInstanceId);
 
     /** Para listado admin (cleanup script). */
-    List<ProcessInstance> findByProcessdefIdOrderByStartedAtDesc(UUID processdefId);
+    List<ProcessInstanceEntity> findByProcessdefIdOrderByStartedAtDesc(UUID processdefId);
 
     /** Hito 3 — migration: instances vivas en una processversion source. */
-    List<ProcessInstance> findByProcessversionIdAndLifecycle(UUID processversionId, String lifecycle);
+    List<ProcessInstanceEntity> findByProcessversionIdAndLifecycle(UUID processversionId, String lifecycle);
 
     // ── Counts LOCALES (F4-mgmt: disuelven el SQL cross-service que hacía system a bpm) ──
     /** Count de instances de una processversion en un lifecycle dado (ej. 'active'). */

@@ -16,7 +16,7 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.MessageStartSubscription;
+import com.imap.bpm.infrastructure.entity.MessageStartSubscriptionEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Repository de MessageStartSubscription.
+ * Repository de MessageStartSubscriptionEntity.
  *
  * Patrón:
  *   - findActiveByTenantAndMessageCode: lookup principal del endpoint
@@ -39,15 +39,15 @@ import java.util.UUID;
  *     viejas del mismo processdef_id+message_code+tenant (V1 simple: solo
  *     current version dispara).
  */
-public interface MessageStartSubscriptionRepository extends JpaRepository<MessageStartSubscription, UUID> {
+public interface MessageStartSubscriptionRepository extends JpaRepository<MessageStartSubscriptionEntity, UUID> {
 
     @Query("""
-        SELECT s FROM MessageStartSubscription s
+        SELECT s FROM MessageStartSubscriptionEntity s
         WHERE s.tenantId = :tenantId
           AND s.messageCode = :messageCode
           AND s.active = true
         """)
-    List<MessageStartSubscription> findActiveByTenantAndMessageCode(
+    List<MessageStartSubscriptionEntity> findActiveByTenantAndMessageCode(
         @Param("tenantId") UUID tenantId,
         @Param("messageCode") String messageCode);
 
@@ -57,7 +57,7 @@ public interface MessageStartSubscriptionRepository extends JpaRepository<Messag
      */
     @Modifying
     @Query("""
-        UPDATE MessageStartSubscription s
+        UPDATE MessageStartSubscriptionEntity s
            SET s.active = false, s.updatedAt = CURRENT_TIMESTAMP
          WHERE s.tenantId = :tenantId
            AND s.messageCode = :messageCode

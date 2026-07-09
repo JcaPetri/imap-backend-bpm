@@ -17,15 +17,15 @@
 
 package com.imap.bpm.infrastructure;
 
-import com.imap.bpm.domain.engine.ProcessDefinition;
-import com.imap.bpm.domain.engine.ProcessDefinitionLoader;
-import com.imap.bpm.domain.engine.ProcessEngine;
-import com.imap.bpm.domain.workhub.ScoreService;
-import com.imap.bpm.domain.workhub.TaskPriority;
+import com.imap.bpm.application.engine.ProcessDefinition;
+import com.imap.bpm.application.engine.ProcessDefinitionLoader;
+import com.imap.bpm.application.engine.ProcessEngine;
+import com.imap.bpm.application.workhub.ScoreService;
+import com.imap.bpm.application.workhub.TaskPriority;
 import com.imap.bpm.infrastructure.sse.SseEventBus;
-import com.imap.bpm.infrastructure.entity.AuditLog;
-import com.imap.bpm.infrastructure.entity.ProcessInstance;
-import com.imap.bpm.infrastructure.entity.TaskInstance;
+import com.imap.bpm.infrastructure.entity.AuditLogEntity;
+import com.imap.bpm.infrastructure.entity.ProcessInstanceEntity;
+import com.imap.bpm.infrastructure.entity.TaskInstanceEntity;
 import com.imap.bpm.infrastructure.repository.AuditLogRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
 import com.imap.bpm.infrastructure.repository.TaskInstanceRepository;
@@ -144,7 +144,7 @@ public class BpmProcessController {
         UUID userId = user != null ? user.userId() : null;
         String bearerToken = extractBearer(req);
 
-        ProcessInstance instance = engine.startProcess(processVersionId,
+        ProcessInstanceEntity instance = engine.startProcess(processVersionId,
             payload == null ? Map.of() : payload,
             bearerToken, tenantId, userId);
 
@@ -160,7 +160,7 @@ public class BpmProcessController {
      *
      * El motor busca subscriptions activas matching (tenantId del header X-Tenant-Id,
      * messageCode del body) en bpm_pro_message_start_subscription_tbl, y arranca un
-     * ProcessInstance por cada match. Permite broadcast.
+     * ProcessInstanceEntity por cada match. Permite broadcast.
      *
      * Respuesta:
      *   { "messageCode": "...",
@@ -204,7 +204,7 @@ public class BpmProcessController {
             return dedup;
         }
 
-        java.util.List<ProcessInstance> instances = engine.startProcessByMessage(
+        java.util.List<ProcessInstanceEntity> instances = engine.startProcessByMessage(
             messageCode, variables, bearerToken, tenantId, userId);
 
         // Registra el eventId procesado (loss-free: si el start falló tiramos antes de llegar acá;
@@ -218,7 +218,7 @@ public class BpmProcessController {
         }
 
         java.util.List<Map<String, Object>> instResponses = new java.util.ArrayList<>(instances.size());
-        for (ProcessInstance inst : instances) {
+        for (ProcessInstanceEntity inst : instances) {
             instResponses.add(toInstanceResponse(inst));
         }
         Map<String, Object> out = new java.util.LinkedHashMap<>();
@@ -237,7 +237,7 @@ public class BpmProcessController {
         UUID userId = user != null ? user.userId() : null;
         String bearerToken = extractBearer(req);
 
-        TaskInstance task = engine.completeTask(taskId,
+        TaskInstanceEntity task = engine.completeTask(taskId,
             outputData == null ? Map.of() : outputData,
             bearerToken, userId);
 
@@ -271,7 +271,7 @@ public class BpmProcessController {
                 "taskId", taskInstanceId));
         }
 
-        TaskInstance task = taskRepo.findById(taskId).orElse(null);
+        TaskInstanceEntity task = taskRepo.findById(taskId).orElse(null);
         UUID instanceId = task != null ? task.getProcessinstanceId() : null;
         sseEventBus.broadcast("bpm.task.claimed", Map.of(
             "taskId", taskInstanceId,
@@ -368,7 +368,7 @@ public class BpmProcessController {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         // Asignadas a mí (assignee = yo)
-        List<TaskInstance> tasks = new ArrayList<>(
+        List<TaskInstanceEntity> tasks = new ArrayList<>(
             taskRepo.findByAssignedUserIdAndLifecycleInOrderByCreatedAtDesc(
                 userId, List.of("created", "reserved")));
 
@@ -394,8 +394,8 @@ public class BpmProcessController {
         // Cache local de definitions (mismo processversion → 1 load por request)
         Map<UUID, ProcessDefinition> defCache = new HashMap<>();
         List<Map<String, Object>> out = new ArrayList<>(tasks.size());
-        for (TaskInstance t : tasks) {
-            ProcessInstance pi = instanceRepo.findById(t.getProcessinstanceId()).orElse(null);
+        for (TaskInstanceEntity t : tasks) {
+            ProcessInstanceEntity pi = instanceRepo.findById(t.getProcessinstanceId()).orElse(null);
             if (pi == null) continue;
 
             ProcessDefinition def = defCache.computeIfAbsent(pi.getProcessversionId(),
@@ -446,10 +446,10 @@ public class BpmProcessController {
         UUID tenantId = TenantContextHolder.get();
         String bearerToken = extractBearer(req);
 
-        TaskInstance t = taskRepo.findById(taskId).orElse(null);
+        TaskInstanceEntity t = taskRepo.findById(taskId).orElse(null);
         if (t == null) return ResponseEntity.notFound().build();
 
-        ProcessInstance pi = instanceRepo.findById(t.getProcessinstanceId()).orElse(null);
+        ProcessInstanceEntity pi = instanceRepo.findById(t.getProcessinstanceId()).orElse(null);
         if (pi == null) return ResponseEntity.notFound().build();
 
         ProcessDefinition def = safeLoad(pi.getProcessversionId(), bearerToken, tenantId);
@@ -499,13 +499,13 @@ public class BpmProcessController {
         UUID tenantId = TenantContextHolder.get();
         String bearerToken = extractBearer(req);
 
-        ProcessInstance pi = instanceRepo.findById(id).orElse(null);
+        ProcessInstanceEntity pi = instanceRepo.findById(id).orElse(null);
         if (pi == null) return ResponseEntity.notFound().build();
 
         ProcessDefinition def = safeLoad(pi.getProcessversionId(), bearerToken, tenantId);
-        List<TaskInstance> tasks = taskRepo.findByProcessinstanceId(id);
-        List<AuditLog> audits = auditRepo.findByProcessinstanceIdOrderByOccurredAtDesc(id);
-        List<com.imap.bpm.infrastructure.entity.Variable> vars = varRepo.findByProcessinstanceId(id);
+        List<TaskInstanceEntity> tasks = taskRepo.findByProcessinstanceId(id);
+        List<AuditLogEntity> audits = auditRepo.findByProcessinstanceIdOrderByOccurredAtDesc(id);
+        List<com.imap.bpm.infrastructure.entity.VariableEntity> vars = varRepo.findByProcessinstanceId(id);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", pi.getId().toString());
@@ -526,15 +526,15 @@ public class BpmProcessController {
         // Útil para el frontend que necesita el contexto del flow (ej. ruleApplied,
         // targetLocationCode, moveId) sin pedir endpoint adicional.
         Map<String, Object> varsMap = new LinkedHashMap<>();
-        for (com.imap.bpm.infrastructure.entity.Variable v : vars) {
+        for (com.imap.bpm.infrastructure.entity.VariableEntity v : vars) {
             varsMap.put(v.getVarName(), v.getVarValue());
         }
         out.put("variables", varsMap);
 
         // Tasks de la instance (orden cronológico ascendente)
-        tasks.sort(Comparator.comparing(TaskInstance::getCreatedAt));
+        tasks.sort(Comparator.comparing(TaskInstanceEntity::getCreatedAt));
         List<Map<String, Object>> tasksOut = new ArrayList<>(tasks.size());
-        for (TaskInstance t : tasks) {
+        for (TaskInstanceEntity t : tasks) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("taskId", t.getId().toString());
             row.put("lifecycle", t.getLifecycle());
@@ -553,7 +553,7 @@ public class BpmProcessController {
 
         // Audit log (más reciente primero, como viene del repo)
         List<Map<String, Object>> auditOut = new ArrayList<>(audits.size());
-        for (AuditLog a : audits) {
+        for (AuditLogEntity a : audits) {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("eventType", a.getEventType());
             row.put("occurredAt", a.getOccurredAt());
@@ -818,14 +818,14 @@ public class BpmProcessController {
             @RequestParam(value = "lifecycle", required = false) String lifecycleFilter) {
         tenantSession.applyToCurrentTransaction();
         UUID processdefId = UUID.fromString(processdefIdStr);
-        List<ProcessInstance> rows;
+        List<ProcessInstanceEntity> rows;
         if (lifecycleFilter == null || lifecycleFilter.isBlank()) {
             rows = instanceRepo.findByProcessdefIdOrderByStartedAtDesc(processdefId);
         } else {
             rows = instanceRepo.findByProcessdefIdAndLifecycle(processdefId, lifecycleFilter);
         }
         List<Map<String, Object>> out = new ArrayList<>(rows.size());
-        for (ProcessInstance i : rows) {
+        for (ProcessInstanceEntity i : rows) {
             Map<String, Object> r = new LinkedHashMap<>();
             r.put("id", i.getId().toString());
             r.put("lifecycle", i.getLifecycle());
@@ -860,7 +860,7 @@ public class BpmProcessController {
             @RequestParam(value = "force", defaultValue = "false") boolean force) {
         tenantSession.applyToCurrentTransaction();
         UUID instanceId = UUID.fromString(instanceIdStr);
-        ProcessInstance instance = instanceRepo.findById(instanceId).orElse(null);
+        ProcessInstanceEntity instance = instanceRepo.findById(instanceId).orElse(null);
         if (instance == null) return ResponseEntity.notFound().build();
 
         // Safety: rechazar si activa salvo ?force=true
@@ -922,7 +922,7 @@ public class BpmProcessController {
         return h.substring(7);
     }
 
-    private Map<String, Object> toInstanceResponse(ProcessInstance i) {
+    private Map<String, Object> toInstanceResponse(ProcessInstanceEntity i) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", i.getId().toString());
         out.put("processdefId", i.getProcessdefId().toString());
@@ -933,7 +933,7 @@ public class BpmProcessController {
         return out;
     }
 
-    private Map<String, Object> toTaskResponse(TaskInstance t) {
+    private Map<String, Object> toTaskResponse(TaskInstanceEntity t) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", t.getId().toString());
         out.put("processinstanceId", t.getProcessinstanceId().toString());

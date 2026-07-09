@@ -1,0 +1,114 @@
+// ─── GOLDEN-RULES:BEGIN (auto · golden-rules.json · no editar a mano) ───
+// REGLAS DE ORO IMAP — cumplir SIEMPRE (ver IMAP_GUIA_DESARROLLO.md):
+//  • HTTP-only entre servicios (+ s2s auth; no SQL cross-service; futuro Kafka)
+//  • Names en inglés
+//  • UUIDv7 en ids
+//  • i18n: idioma del string, no de la fila; datos (UUID, field, idioma)
+//  • VtR: único canal con el frontend (front solo ve virtual)
+//  • Hexagonal estricto (domain no depende de infra)
+//  • No secrets en código (.env en C:\Applications, nunca hardcodear)
+//  • Idempotencia en operaciones de negocio (idempotency key)
+//  • [persistence] Audit7: tenant_id|state_id|created_at|created_by_id|updated_at|updated_by_id|owned_by_id
+//  • [persistence] RLS por tenant + tenant_id en toda tabla
+//  • [persistence] Soft-delete por state (archived), nunca DELETE físico
+//  • [persistence] Naming SQL Opción B (id PK · _id FKs · _at timestamps · is_* booleans)
+//  • [persistence] Flyway: cambios de schema versionados, nunca DDL ad-hoc en prod
+//  • [persistence] Native queries: CAST(x AS t), NO x::t (Hibernate confunde :: con bind param)
+//  • [bpm] Orquestador central (tipo Temporal/Step Functions)
+//  • [bpm] processdef→processversion: snapshot inmutable al activar
+//  • [bpm] Las defs de proceso viven acá (no en system)
+//  • [bpm] Camunda 8 como norte; interim form-driven en prod
+// ─── GOLDEN-RULES:END ───
+
+package com.imap.bpm.infrastructure.entity;
+
+import io.hypersistence.utils.hibernate.type.json.JsonBinaryType;
+import jakarta.persistence.*;
+import org.hibernate.annotations.Type;
+
+import java.time.OffsetDateTime;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * JPA entity para bpm.bpm_hum_taskinstance_tbl. Tarea humana asignada.
+ */
+@Entity
+@Table(name = "bpm_hum_taskinstance_tbl")
+public class TaskInstanceEntity {
+
+    @Id @Column(name = "id")                                 private UUID id;
+    @Column(name = "tenant_id", nullable = false)            private UUID tenantId;
+    @Column(name = "processinstance_id", nullable = false)   private UUID processinstanceId;
+    @Column(name = "flowelement_id", nullable = false)       private UUID flowelementId;
+    @Column(name = "token_id")                                private UUID tokenId;
+    @Column(name = "lifecycle", nullable = false, length = 20) private String lifecycle;
+    @Column(name = "assigned_user_id")                       private UUID assignedUserId;
+    @Column(name = "assigned_role", length = 100)            private String assignedRole;
+    @Column(name = "priority", nullable = false)             private Integer priority;
+    @Column(name = "due_at")                                 private OffsetDateTime dueAt;
+    @Column(name = "assigned_at")                            private OffsetDateTime assignedAt;
+    @Column(name = "started_at")                             private OffsetDateTime startedAt;
+    @Column(name = "completed_at")                           private OffsetDateTime completedAt;
+
+    @Type(JsonBinaryType.class)
+    @Column(name = "input_data_jsonb", columnDefinition = "jsonb")
+    private Map<String, Object> inputData;
+
+    @Type(JsonBinaryType.class)
+    @Column(name = "output_data_jsonb", columnDefinition = "jsonb")
+    private Map<String, Object> outputData;
+
+    @Column(name = "state_id", nullable = false)             private UUID stateId;
+    @Column(name = "created_at", nullable = false, updatable = false)           private OffsetDateTime createdAt;
+    @Column(name = "updated_at", nullable = false)           private OffsetDateTime updatedAt;
+    @Column(name = "created_by_id", updatable = false)                          private UUID createdById;
+    @Column(name = "updated_by_id")                          private UUID updatedById;
+    @Column(name = "owned_by_id", updatable = false)                            private UUID ownedById;
+
+    public TaskInstanceEntity() {}
+
+    public UUID getId()                       { return id; }
+    public void setId(UUID id)                { this.id = id; }
+    public UUID getTenantId()                 { return tenantId; }
+    public void setTenantId(UUID id)          { this.tenantId = id; }
+    public UUID getProcessinstanceId()        { return processinstanceId; }
+    public void setProcessinstanceId(UUID id) { this.processinstanceId = id; }
+    public UUID getFlowelementId()            { return flowelementId; }
+    public void setFlowelementId(UUID id)     { this.flowelementId = id; }
+    public UUID getTokenId()                  { return tokenId; }
+    public void setTokenId(UUID id)           { this.tokenId = id; }
+    public String getLifecycle()              { return lifecycle; }
+    public void setLifecycle(String s)        { this.lifecycle = s; }
+    public UUID getAssignedUserId()           { return assignedUserId; }
+    public void setAssignedUserId(UUID id)    { this.assignedUserId = id; }
+    public String getAssignedRole()           { return assignedRole; }
+    public void setAssignedRole(String s)     { this.assignedRole = s; }
+    public Integer getPriority()              { return priority; }
+    public void setPriority(Integer p)        { this.priority = p; }
+    public OffsetDateTime getDueAt()          { return dueAt; }
+    public void setDueAt(OffsetDateTime t)    { this.dueAt = t; }
+    public OffsetDateTime getAssignedAt()     { return assignedAt; }
+    public void setAssignedAt(OffsetDateTime t) { this.assignedAt = t; }
+    public OffsetDateTime getStartedAt()      { return startedAt; }
+    public void setStartedAt(OffsetDateTime t){ this.startedAt = t; }
+    public OffsetDateTime getCompletedAt()    { return completedAt; }
+    public void setCompletedAt(OffsetDateTime t) { this.completedAt = t; }
+    public Map<String, Object> getInputData() { return inputData; }
+    public void setInputData(Map<String, Object> m) { this.inputData = m; }
+    public Map<String, Object> getOutputData(){ return outputData; }
+    public void setOutputData(Map<String, Object> m) { this.outputData = m; }
+
+    public UUID getStateId()                  { return stateId; }
+    public void setStateId(UUID id)           { this.stateId = id; }
+    public OffsetDateTime getCreatedAt()      { return createdAt; }
+    public void setCreatedAt(OffsetDateTime t){ this.createdAt = t; }
+    public OffsetDateTime getUpdatedAt()      { return updatedAt; }
+    public void setUpdatedAt(OffsetDateTime t){ this.updatedAt = t; }
+    public UUID getCreatedById()              { return createdById; }
+    public void setCreatedById(UUID id)       { this.createdById = id; }
+    public UUID getUpdatedById()              { return updatedById; }
+    public void setUpdatedById(UUID id)       { this.updatedById = id; }
+    public UUID getOwnedById()                { return ownedById; }
+    public void setOwnedById(UUID id)         { this.ownedById = id; }
+}

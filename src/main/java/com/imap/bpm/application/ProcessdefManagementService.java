@@ -20,17 +20,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.domain.dto.CreateProcessdefRequest;
 import com.imap.bpm.domain.dto.CreateProcessdefResponse;
 import com.imap.bpm.infrastructure.SystemEntityResolver;
-import com.imap.bpm.infrastructure.entity.Flowelement;
-import com.imap.bpm.infrastructure.entity.Processdef;
-import com.imap.bpm.infrastructure.entity.Processversion;
-import com.imap.bpm.infrastructure.entity.Sequenceflow;
-import com.imap.bpm.infrastructure.entity.Taskform;
-import com.imap.bpm.infrastructure.repository.FlowelementRepository;
+import com.imap.bpm.domain.model.Flowelement;
+import com.imap.bpm.domain.model.Processdef;
+import com.imap.bpm.domain.model.Processversion;
+import com.imap.bpm.domain.model.Sequenceflow;
+import com.imap.bpm.domain.model.Taskform;
+import com.imap.bpm.domain.port.out.FlowelementRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
-import com.imap.bpm.infrastructure.repository.ProcessdefRepository;
-import com.imap.bpm.infrastructure.repository.ProcessversionRepository;
-import com.imap.bpm.infrastructure.repository.SequenceflowRepository;
-import com.imap.bpm.infrastructure.repository.TaskformRepository;
+import com.imap.bpm.domain.port.out.ProcessdefRepository;
+import com.imap.bpm.domain.port.out.ProcessversionRepository;
+import com.imap.bpm.domain.port.out.SequenceflowRepository;
+import com.imap.bpm.domain.port.out.TaskformRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -126,40 +126,32 @@ public class ProcessdefManagementService {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-        // 2. Processdef (header)
-        Processdef pd = new Processdef();
-        pd.setId(UUID.randomUUID());
-        pd.setCode(req.header().code());
-        pd.setName(req.header().name());
-        pd.setDescription(req.header().description());
-        pd.setLifecycle(req.header().lifecycle());
-        pd.setStartPermission(blankToNull(req.header().startPermission()));
-        stampAudit(pd::setTenantId, pd::setStateId, pd::setCreatedById, pd::setOwnedById, tenantId, userId);
+        // 2. Processdef (header) — modelo inmutable. currentversionId=null hasta crear v1.
         // created_at/updated_at explícitos: el processdef se re-guarda (UPDATE al setear
-        // currentversion_id) y ese UPDATE mandaría created_at=NULL (la entity en memoria no
+        // currentversion_id) y ese UPDATE mandaría created_at=NULL (el modelo en memoria no
         // toma el DEFAULT now() del INSERT) → viola NOT NULL. Los demás son single-INSERT.
-        pd.setCreatedAt(now);
-        pd.setUpdatedAt(now);
-        processdefRepository.save(pd);
+        UUID pdId = UUID.randomUUID();
+        Processdef pd = new Processdef(
+            pdId, tenantId, req.header().code(), req.header().name(),
+            req.header().description(), null, req.header().lifecycle(),
+            blankToNull(req.header().startPermission()), DEFAULT_STATE_ACTIVE,
+            now, now, userId, null, userId);
+        pd = processdefRepository.save(pd);
 
         // 3. Processversion v1
-        Processversion pv = new Processversion();
-        pv.setId(UUID.randomUUID());
-        pv.setProcessdefId(pd.getId());
-        pv.setVersion(1);
-        pv.setPublishedAt(now);
-        pv.setDefinition("{}");
-        pv.setLocked(true);
-        pv.setDescription("v1 of " + req.header().code());
-        pv.setTenantId(tenantId);
-        pv.setStateId(DEFAULT_STATE_ACTIVE);
-        pv.setCreatedById(userId);
-        pv.setOwnedById(userId);
-        processversionRepository.save(pv);
+        Processversion pv = new Processversion(
+            UUID.randomUUID(), tenantId, pd.getId(), 1, now, "{}", true,
+            "v1 of " + req.header().code(), DEFAULT_STATE_ACTIVE,
+            now, null, userId, null, userId);
+        pv = processversionRepository.save(pv);
 
-        // 4. Puntero currentversion
-        pd.setCurrentversionId(pv.getId());
-        processdefRepository.save(pd);
+        // 4. Puntero currentversion → reconstruir el modelo con currentversionId apuntando a v1.
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), pd.getName(),
+            pd.getDescription(), pv.getId(), pd.getLifecycle(),
+            pd.getStartPermission(), pd.getStateId(),
+            pd.getCreatedAt(), now, pd.getCreatedById(), pd.getUpdatedById(), pd.getOwnedById());
+        pd = processdefRepository.save(pd);
 
         // 5-7. Grafo (flowElements → sequenceFlows → taskForms) sobre la version v1.
         writeGraph(req, pv.getId(), tenantId, userId);
@@ -183,36 +175,24 @@ public class ProcessdefManagementService {
         // Flow elements → mapa code→id (para resolver source/target + taskforms)
         Map<String, UUID> feIdByCode = new LinkedHashMap<>();
         for (CreateProcessdefRequest.FlowElement fe : req.flowElements()) {
-            Flowelement e = new Flowelement();
-            e.setId(UUID.randomUUID());
-            e.setProcessversionId(processversionId);
-            e.setElementCode(fe.code());
-            e.setElementType(fe.type());
-            e.setName(fe.name());
-            e.setConfig(serializeConfig(fe.config()));
-            e.setSortOrder(fe.sortOrder());
-            e.setTenantId(tenantId);
-            e.setStateId(DEFAULT_STATE_ACTIVE);
-            e.setCreatedById(userId);
-            e.setOwnedById(userId);
+            UUID feId = UUID.randomUUID();
+            Flowelement e = new Flowelement(
+                feId, tenantId, processversionId, fe.code(), fe.type(), fe.name(),
+                serializeConfig(fe.config()), fe.sortOrder(), DEFAULT_STATE_ACTIVE,
+                null, null, userId, null, userId);
             flowelementRepository.save(e);
-            feIdByCode.put(fe.code(), e.getId());
+            feIdByCode.put(fe.code(), feId);
         }
 
         // Sequence flows (source/target resueltos del mapa)
         if (req.sequenceFlows() != null) {
             for (CreateProcessdefRequest.SequenceFlow sf : req.sequenceFlows()) {
-                Sequenceflow e = new Sequenceflow();
-                e.setId(UUID.randomUUID());
-                e.setProcessversionId(processversionId);
-                e.setSourceId(feIdByCode.get(sf.sourceCode()));   // no-null garantizado por validateRequest
-                e.setTargetId(feIdByCode.get(sf.targetCode()));
-                e.setConditionExpr(blankToNull(sf.conditionExpr()));
-                e.setSortOrder(sf.sortOrder());
-                e.setTenantId(tenantId);
-                e.setStateId(DEFAULT_STATE_ACTIVE);
-                e.setCreatedById(userId);
-                e.setOwnedById(userId);
+                Sequenceflow e = new Sequenceflow(
+                    UUID.randomUUID(), tenantId, processversionId,
+                    feIdByCode.get(sf.sourceCode()),   // no-null garantizado por validateRequest
+                    feIdByCode.get(sf.targetCode()),
+                    blankToNull(sf.conditionExpr()), sf.sortOrder(), null,
+                    DEFAULT_STATE_ACTIVE, null, null, userId, null, userId);
                 sequenceflowRepository.save(e);
             }
         }
@@ -220,15 +200,11 @@ public class ProcessdefManagementService {
         // Task forms (flowElementId del mapa; entitydefId resuelto s2s)
         if (req.taskForms() != null) {
             for (CreateProcessdefRequest.TaskForm tf : req.taskForms()) {
-                Taskform e = new Taskform();
-                e.setId(UUID.randomUUID());
-                e.setFlowelementId(feIdByCode.get(tf.flowElementCode()));
-                e.setEntitydefId(systemEntityResolver.resolveId(tf.entityDefCode(), tenantId));
-                e.setMode(tf.mode() == null || tf.mode().isBlank() ? "edit" : tf.mode());
-                e.setTenantId(tenantId);
-                e.setStateId(DEFAULT_STATE_ACTIVE);
-                e.setCreatedById(userId);
-                e.setOwnedById(userId);
+                Taskform e = new Taskform(
+                    UUID.randomUUID(), tenantId, feIdByCode.get(tf.flowElementCode()),
+                    systemEntityResolver.resolveId(tf.entityDefCode(), tenantId),
+                    tf.mode() == null || tf.mode().isBlank() ? "edit" : tf.mode(),
+                    DEFAULT_STATE_ACTIVE, null, null, userId, null, userId);
                 taskformRepository.save(e);
             }
         }
@@ -320,14 +296,13 @@ public class ProcessdefManagementService {
         writeGraph(req, pvId, tenantId, userId);
 
         // 8. Actualizar header del processdef (code NO se toca — ya validado immutable).
-        //    Cargamos la entity existente (ya tiene created_at de la DB) → el UPDATE preserva created_at.
+        //    Reconstruimos el modelo preservando created_at + puntero currentversion existentes.
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        pd.setName(req.header().name());
-        pd.setDescription(req.header().description());
-        pd.setLifecycle(req.header().lifecycle());
-        pd.setStartPermission(blankToNull(req.header().startPermission()));
-        pd.setUpdatedById(userId);
-        pd.setUpdatedAt(now);
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), req.header().name(),
+            req.header().description(), pd.getCurrentversionId(), req.header().lifecycle(),
+            blankToNull(req.header().startPermission()), pd.getStateId(),
+            pd.getCreatedAt(), now, pd.getCreatedById(), userId, pd.getOwnedById());
         processdefRepository.save(pd);
 
         log.info("Processdef updated — code='{}' processdefId={} pv={} fe={} sf={} tf={}",
@@ -349,9 +324,12 @@ public class ProcessdefManagementService {
         if (pd == null) {
             throw new IllegalArgumentException("Processdef not found: " + processdefId);
         }
-        pd.setLifecycle("inactive");
-        pd.setUpdatedById(userId);
-        pd.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), pd.getName(),
+            pd.getDescription(), pd.getCurrentversionId(), "inactive",
+            pd.getStartPermission(), pd.getStateId(),
+            pd.getCreatedAt(), OffsetDateTime.now(ZoneOffset.UTC),
+            pd.getCreatedById(), userId, pd.getOwnedById());
         processdefRepository.save(pd);
         log.info("Processdef {} soft-deleted (lifecycle=inactive)", processdefId);
     }
@@ -408,32 +386,22 @@ public class ProcessdefManagementService {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         // 5. Crear la nueva processversion (single-INSERT)
-        Processversion pv = new Processversion();
-        pv.setId(UUID.randomUUID());
-        pv.setProcessdefId(processdefId);
-        pv.setVersion(newVer);
-        pv.setPublishedAt(now);
-        pv.setDefinition("{}");
-        pv.setLocked(true);
-        pv.setDescription("v" + newVer + " of " + req.header().code());
-        pv.setTenantId(tenantId);
-        pv.setStateId(DEFAULT_STATE_ACTIVE);
-        pv.setCreatedById(userId);
-        pv.setOwnedById(userId);
-        processversionRepository.save(pv);
+        Processversion pv = new Processversion(
+            UUID.randomUUID(), tenantId, processdefId, newVer, now, "{}", true,
+            "v" + newVer + " of " + req.header().code(), DEFAULT_STATE_ACTIVE,
+            now, null, userId, null, userId);
+        pv = processversionRepository.save(pv);
 
         // 6. Grafo de la nueva version
         writeGraph(req, pv.getId(), tenantId, userId);
 
         // 7. Header del processdef puede haber cambiado (name/description/lifecycle);
-        //    code NO. Cargamos la entity existente → preserva created_at. Puntero al nuevo.
-        pd.setName(req.header().name());
-        pd.setDescription(req.header().description());
-        pd.setLifecycle(req.header().lifecycle());
-        pd.setStartPermission(blankToNull(req.header().startPermission()));
-        pd.setCurrentversionId(pv.getId());
-        pd.setUpdatedById(userId);
-        pd.setUpdatedAt(now);
+        //    code NO. Reconstruimos el modelo preservando created_at. Puntero al nuevo.
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), req.header().name(),
+            req.header().description(), pv.getId(), req.header().lifecycle(),
+            blankToNull(req.header().startPermission()), pd.getStateId(),
+            pd.getCreatedAt(), now, pd.getCreatedById(), userId, pd.getOwnedById());
         processdefRepository.save(pd);
 
         log.info("Published v{} of processdef code='{}' processdefId={} newPv={} fe={} sf={} tf={}",
@@ -565,8 +533,9 @@ public class ProcessdefManagementService {
         Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         UUID currentVerId = pd == null ? null : pd.getCurrentversionId();
 
-        List<Processversion> versions = processversionRepository
-            .findByProcessdefIdOrderByVersionDesc(processdefId);
+        // Copia mutable: el puerto devuelve lista inmutable (adapter usa toList()).
+        List<Processversion> versions = new ArrayList<>(processversionRepository
+            .findByProcessdefIdOrderByVersionDesc(processdefId));
         // asc por version (el finder devuelve desc)
         versions.sort(Comparator.comparing(
             v -> v.getVersion() == null ? 0 : v.getVersion()));
@@ -780,17 +749,5 @@ public class ProcessdefManagementService {
         } catch (Exception e) {
             return Map.of();
         }
-    }
-
-    /** Setea el núcleo audit-7 (bpm no setea GUC de user → explícito). */
-    private void stampAudit(java.util.function.Consumer<UUID> setTenant,
-                            java.util.function.Consumer<UUID> setState,
-                            java.util.function.Consumer<UUID> setCreatedBy,
-                            java.util.function.Consumer<UUID> setOwnedBy,
-                            UUID tenantId, UUID userId) {
-        setTenant.accept(tenantId);
-        setState.accept(DEFAULT_STATE_ACTIVE);
-        setCreatedBy.accept(userId);
-        setOwnedBy.accept(userId);
     }
 }

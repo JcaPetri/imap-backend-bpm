@@ -16,12 +16,12 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.Decisiondef;
+import com.imap.bpm.infrastructure.entity.DecisiondefEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.Optional;
 import java.util.UUID;
 
-public interface DecisiondefRepository extends JpaRepository<Decisiondef, UUID> {
-    Optional<Decisiondef> findByTenantIdAndCode(UUID tenantId, String code);
+public interface DecisiondefRepository extends JpaRepository<DecisiondefEntity, UUID> {
+    Optional<DecisiondefEntity> findByTenantIdAndCode(UUID tenantId, String code);
 }

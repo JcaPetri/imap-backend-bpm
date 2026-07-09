@@ -16,7 +16,7 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.JobExecutor;
+import com.imap.bpm.infrastructure.entity.JobExecutorEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -27,7 +27,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.UUID;
 
-public interface JobExecutorRepository extends JpaRepository<JobExecutor, UUID> {
+public interface JobExecutorRepository extends JpaRepository<JobExecutorEntity, UUID> {
 
     /**
      * Jobs vencidos esperando firing. Worker scheduled lo polea cada N seg.
@@ -37,16 +37,16 @@ public interface JobExecutorRepository extends JpaRepository<JobExecutor, UUID> 
      * NOTE: usa LIMIT 50 — overflow se procesa en la próxima iter del worker.
      */
     @Query("""
-        SELECT j FROM JobExecutor j
+        SELECT j FROM JobExecutorEntity j
          WHERE j.lifecycle = 'scheduled'
            AND j.fireAt <= :now
          ORDER BY j.fireAt
         """)
-    List<JobExecutor> findDueJobs(@Param("now") OffsetDateTime now,
+    List<JobExecutorEntity> findDueJobs(@Param("now") OffsetDateTime now,
                                   org.springframework.data.domain.Pageable pageable);
 
-    List<JobExecutor> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
-    List<JobExecutor> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
+    List<JobExecutorEntity> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
+    List<JobExecutorEntity> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
 
     /**
      * Cascade DELETE de instance (admin cleanup).
@@ -58,6 +58,6 @@ public interface JobExecutorRepository extends JpaRepository<JobExecutor, UUID> 
      */
     @Modifying
     @Transactional
-    @Query("DELETE FROM JobExecutor j WHERE j.processinstanceId = :pid")
+    @Query("DELETE FROM JobExecutorEntity j WHERE j.processinstanceId = :pid")
     int deleteByProcessinstanceId(@Param("pid") UUID processinstanceId);
 }

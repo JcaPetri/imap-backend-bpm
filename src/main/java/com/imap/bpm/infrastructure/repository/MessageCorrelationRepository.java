@@ -16,20 +16,20 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.MessageCorrelation;
+import com.imap.bpm.infrastructure.entity.MessageCorrelationEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.UUID;
 
-public interface MessageCorrelationRepository extends JpaRepository<MessageCorrelation, UUID> {
+public interface MessageCorrelationRepository extends JpaRepository<MessageCorrelationEntity, UUID> {
 
     /**
      * Lookup para mensaje dirigido (point-to-point). Devuelve correlations
      * waiting que matcheen exactamente messagedefId + correlationKey.
      * Típicamente devuelve 1 row (un token waiting por ese key).
      */
-    List<MessageCorrelation> findByMessagedefIdAndCorrelationKeyAndLifecycle(
+    List<MessageCorrelationEntity> findByMessagedefIdAndCorrelationKeyAndLifecycle(
         UUID messagedefId, String correlationKey, String lifecycle);
 
     /**
@@ -37,13 +37,13 @@ public interface MessageCorrelationRepository extends JpaRepository<MessageCorre
      * waiting con ese messagedefId (correlationKey siempre BROADCAST_KEY
      * para señales, pero el repo no asume — el caller filtra).
      */
-    List<MessageCorrelation> findByMessagedefIdAndLifecycle(
+    List<MessageCorrelationEntity> findByMessagedefIdAndLifecycle(
         UUID messagedefId, String lifecycle);
 
-    List<MessageCorrelation> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
+    List<MessageCorrelationEntity> findByTokenIdAndLifecycle(UUID tokenId, String lifecycle);
 
     /** Para C1 cancel: cancelar correlations waiting de la instance. */
-    List<MessageCorrelation> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
+    List<MessageCorrelationEntity> findByProcessinstanceIdAndLifecycle(UUID processinstanceId, String lifecycle);
 
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);

@@ -17,15 +17,15 @@
 package com.imap.bpm.application;
 
 import com.imap.bpm.domain.dto.MigrationPlanDto;
-import com.imap.bpm.infrastructure.entity.Flowelement;
-import com.imap.bpm.infrastructure.entity.Migrationplan;
-import com.imap.bpm.infrastructure.entity.Migrationrule;
-import com.imap.bpm.infrastructure.entity.Processversion;
-import com.imap.bpm.infrastructure.repository.FlowelementRepository;
-import com.imap.bpm.infrastructure.repository.MigrationplanRepository;
-import com.imap.bpm.infrastructure.repository.MigrationruleRepository;
+import com.imap.bpm.domain.model.Migrationplan;
+import com.imap.bpm.domain.model.Migrationrule;
+import com.imap.bpm.domain.port.out.MigrationplanRepository;
+import com.imap.bpm.domain.port.out.MigrationruleRepository;
+import com.imap.bpm.domain.model.Flowelement;
+import com.imap.bpm.domain.model.Processversion;
+import com.imap.bpm.domain.port.out.FlowelementRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
-import com.imap.bpm.infrastructure.repository.ProcessversionRepository;
+import com.imap.bpm.domain.port.out.ProcessversionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -120,21 +120,13 @@ public class MigrationPlanManagementService {
 
         // 3. Crear header del plan (single-INSERT, pero seteamos created_at/updated_at
         //    explícito para no depender del DEFAULT now() en el flush).
-        Migrationplan plan = new Migrationplan();
-        plan.setId(UUID.randomUUID());
-        plan.setCode(req.code());
-        plan.setDescription(blankToNull(req.description()));
-        plan.setSourceProcessversionId(srcPvId);
-        plan.setTargetProcessversionId(tgtPvId);
-        plan.setStatus("draft");
-        plan.setTenantId(tenantId);
-        plan.setStateId(DEFAULT_STATE_ACTIVE);
-        plan.setCreatedById(userId);
-        plan.setOwnedById(userId);
-        plan.setCreatedAt(now);
-        plan.setUpdatedAt(now);
+        UUID planId = UUID.randomUUID();
+        Migrationplan plan = new Migrationplan(
+            planId, tenantId, req.code(), blankToNull(req.description()),
+            srcPvId, tgtPvId, "draft",
+            null, null, null, DEFAULT_STATE_ACTIVE,
+            now, now, userId, null, userId);
         planRepo.save(plan);
-        UUID planId = plan.getId();
 
         // 4. Auto-generar reglas 1:1 por code match entre source y target (LOCAL)
         List<String> sourceCodes = loadFlowElementCodes(srcPvId);
@@ -159,20 +151,11 @@ public class MigrationPlanManagementService {
     private void createRule(UUID planId, String srcCode, String tgtCode, String action,
                             int sortOrder, String notes,
                             UUID tenantId, UUID userId, OffsetDateTime now) {
-        Migrationrule rule = new Migrationrule();
-        rule.setId(UUID.randomUUID());
-        rule.setMigrationplanId(planId);
-        rule.setSourceFlowelementCode(srcCode);
-        rule.setTargetFlowelementCode(blankToNull(tgtCode));
-        rule.setAction(action);
-        rule.setSortOrder(sortOrder);
-        rule.setNotes(blankToNull(notes));
-        rule.setTenantId(tenantId);
-        rule.setStateId(DEFAULT_STATE_ACTIVE);
-        rule.setCreatedById(userId);
-        rule.setOwnedById(userId);
-        rule.setCreatedAt(now);
-        rule.setUpdatedAt(now);
+        Migrationrule rule = new Migrationrule(
+            UUID.randomUUID(), tenantId, planId,
+            srcCode, blankToNull(tgtCode), action,
+            sortOrder, blankToNull(notes), DEFAULT_STATE_ACTIVE,
+            now, now, userId, null, userId);
         ruleRepo.save(rule);
     }
 
@@ -247,12 +230,15 @@ public class MigrationPlanManagementService {
             }
         }
 
-        // Reset status a draft (re-validar tras editar reglas). Cargamos la entity
-        // existente (ya trae created_at de la DB) → el UPDATE preserva created_at.
-        plan.setStatus("draft");
-        plan.setUpdatedById(userId);
-        plan.setUpdatedAt(now);
-        planRepo.save(plan);
+        // Reset status a draft (re-validar tras editar reglas). Construimos un nuevo
+        // modelo copiando lo que NO cambia (el adapter load-and-mutate preserva
+        // created_at por updatable=false igual) y seteando status/updated_*.
+        Migrationplan updated = new Migrationplan(
+            plan.getId(), plan.getTenantId(), plan.getCode(), plan.getDescription(),
+            plan.getSourceProcessversionId(), plan.getTargetProcessversionId(), "draft",
+            plan.getAppliedAt(), plan.getAppliedBy(), plan.getStats(), plan.getStateId(),
+            plan.getCreatedAt(), now, plan.getCreatedById(), userId, plan.getOwnedById());
+        planRepo.save(updated);
 
         log.info("Updated rules for plan {} — count={}", planId, count);
         return getPlanDetail(planId);
@@ -326,13 +312,15 @@ public class MigrationPlanManagementService {
             }
         }
 
-        // 6. Update status del plan según resultado (preserva created_at via findById)
+        // 6. Update status del plan según resultado (preserva created_at via load-and-mutate)
         boolean valid = errors.isEmpty();
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        plan.setStatus(valid ? "validated" : "draft");
-        plan.setUpdatedById(userId);
-        plan.setUpdatedAt(now);
-        planRepo.save(plan);
+        Migrationplan updated = new Migrationplan(
+            plan.getId(), plan.getTenantId(), plan.getCode(), plan.getDescription(),
+            plan.getSourceProcessversionId(), plan.getTargetProcessversionId(), valid ? "validated" : "draft",
+            plan.getAppliedAt(), plan.getAppliedBy(), plan.getStats(), plan.getStateId(),
+            plan.getCreatedAt(), now, plan.getCreatedById(), userId, plan.getOwnedById());
+        planRepo.save(updated);
 
         return new MigrationPlanDto.ValidationReport(valid, sourceInstancesActive, errors, warnings);
     }
@@ -360,21 +348,20 @@ public class MigrationPlanManagementService {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         UUID appliedBy = parseUuidOrNull(appliedByUserId);
 
-        plan.setStatus(success ? "applied" : "failed");
-        plan.setAppliedAt(now);
-        if (appliedBy != null) {
-            plan.setAppliedBy(appliedBy);
-        }
-        if (statsJson != null) {
-            plan.setStats(statsJson);
-        }
-        plan.setUpdatedById(appliedBy);
-        plan.setUpdatedAt(now);
-        planRepo.save(plan);
+        String status = success ? "applied" : "failed";
+        UUID newAppliedBy = appliedBy != null ? appliedBy : plan.getAppliedBy();
+        String newStats = statsJson != null ? statsJson : plan.getStats();
+
+        Migrationplan updated = new Migrationplan(
+            plan.getId(), plan.getTenantId(), plan.getCode(), plan.getDescription(),
+            plan.getSourceProcessversionId(), plan.getTargetProcessversionId(), status,
+            now, newAppliedBy, newStats, plan.getStateId(),
+            plan.getCreatedAt(), now, plan.getCreatedById(), appliedBy, plan.getOwnedById());
+        Migrationplan saved = planRepo.save(updated);
 
         log.info("Marked plan {} as '{}' (appliedBy={}, statsLen={})",
-            planId, plan.getStatus(), appliedByUserId, statsJson == null ? 0 : statsJson.length());
-        return toSummary(plan);
+            planId, saved.getStatus(), appliedByUserId, statsJson == null ? 0 : statsJson.length());
+        return toSummary(saved);
     }
 
     // ════════════════════════════════════════════════════════════════════════
