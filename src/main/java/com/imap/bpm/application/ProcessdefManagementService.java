@@ -20,17 +20,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.domain.dto.CreateProcessdefRequest;
 import com.imap.bpm.domain.dto.CreateProcessdefResponse;
 import com.imap.bpm.infrastructure.SystemEntityResolver;
-import com.imap.bpm.infrastructure.entity.FlowelementEntity;
-import com.imap.bpm.infrastructure.entity.ProcessdefEntity;
-import com.imap.bpm.infrastructure.entity.ProcessversionEntity;
-import com.imap.bpm.infrastructure.entity.SequenceflowEntity;
-import com.imap.bpm.infrastructure.entity.TaskformEntity;
-import com.imap.bpm.infrastructure.repository.FlowelementRepository;
+import com.imap.bpm.domain.model.Flowelement;
+import com.imap.bpm.domain.model.Processdef;
+import com.imap.bpm.domain.model.Processversion;
+import com.imap.bpm.domain.model.Sequenceflow;
+import com.imap.bpm.domain.model.Taskform;
+import com.imap.bpm.domain.port.out.FlowelementRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
-import com.imap.bpm.infrastructure.repository.ProcessdefRepository;
-import com.imap.bpm.infrastructure.repository.ProcessversionRepository;
-import com.imap.bpm.infrastructure.repository.SequenceflowRepository;
-import com.imap.bpm.infrastructure.repository.TaskformRepository;
+import com.imap.bpm.domain.port.out.ProcessdefRepository;
+import com.imap.bpm.domain.port.out.ProcessversionRepository;
+import com.imap.bpm.domain.port.out.SequenceflowRepository;
+import com.imap.bpm.domain.port.out.TaskformRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -117,7 +117,7 @@ public class ProcessdefManagementService {
         int tfCount = req.taskForms() == null ? 0 : req.taskForms().size();
 
         if (dryRun) {
-            log.info("ProcessdefEntity create — DRY RUN OK code='{}' flowElements={} sequenceFlows={} taskForms={}",
+            log.info("Processdef create — DRY RUN OK code='{}' flowElements={} sequenceFlows={} taskForms={}",
                 req.header().code(), feCount, sfCount, tfCount);
             return new CreateProcessdefResponse(null, null, 1,
                 new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
@@ -126,50 +126,42 @@ public class ProcessdefManagementService {
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
-        // 2. ProcessdefEntity (header)
-        ProcessdefEntity pd = new ProcessdefEntity();
-        pd.setId(UUID.randomUUID());
-        pd.setCode(req.header().code());
-        pd.setName(req.header().name());
-        pd.setDescription(req.header().description());
-        pd.setLifecycle(req.header().lifecycle());
-        pd.setStartPermission(blankToNull(req.header().startPermission()));
-        stampAudit(pd::setTenantId, pd::setStateId, pd::setCreatedById, pd::setOwnedById, tenantId, userId);
+        // 2. Processdef (header) — modelo inmutable. currentversionId=null hasta crear v1.
         // created_at/updated_at explícitos: el processdef se re-guarda (UPDATE al setear
-        // currentversion_id) y ese UPDATE mandaría created_at=NULL (la entity en memoria no
+        // currentversion_id) y ese UPDATE mandaría created_at=NULL (el modelo en memoria no
         // toma el DEFAULT now() del INSERT) → viola NOT NULL. Los demás son single-INSERT.
-        pd.setCreatedAt(now);
-        pd.setUpdatedAt(now);
-        processdefRepository.save(pd);
+        UUID pdId = UUID.randomUUID();
+        Processdef pd = new Processdef(
+            pdId, tenantId, req.header().code(), req.header().name(),
+            req.header().description(), null, req.header().lifecycle(),
+            blankToNull(req.header().startPermission()), DEFAULT_STATE_ACTIVE,
+            now, now, userId, null, userId);
+        pd = processdefRepository.save(pd);
 
-        // 3. ProcessversionEntity v1
-        ProcessversionEntity pv = new ProcessversionEntity();
-        pv.setId(UUID.randomUUID());
-        pv.setProcessdefId(pd.getId());
-        pv.setVersion(1);
-        pv.setPublishedAt(now);
-        pv.setDefinition("{}");
-        pv.setLocked(true);
-        pv.setDescription("v1 of " + req.header().code());
-        pv.setTenantId(tenantId);
-        pv.setStateId(DEFAULT_STATE_ACTIVE);
-        pv.setCreatedById(userId);
-        pv.setOwnedById(userId);
-        processversionRepository.save(pv);
+        // 3. Processversion v1
+        Processversion pv = new Processversion(
+            UUID.randomUUID(), tenantId, pd.getId(), 1, now, "{}", true,
+            "v1 of " + req.header().code(), DEFAULT_STATE_ACTIVE,
+            now, null, userId, null, userId);
+        pv = processversionRepository.save(pv);
 
-        // 4. Puntero currentversion
-        pd.setCurrentversionId(pv.getId());
-        processdefRepository.save(pd);
+        // 4. Puntero currentversion → reconstruir el modelo con currentversionId apuntando a v1.
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), pd.getName(),
+            pd.getDescription(), pv.getId(), pd.getLifecycle(),
+            pd.getStartPermission(), pd.getStateId(),
+            pd.getCreatedAt(), now, pd.getCreatedById(), pd.getUpdatedById(), pd.getOwnedById());
+        pd = processdefRepository.save(pd);
 
         // 5-7. Grafo (flowElements → sequenceFlows → taskForms) sobre la version v1.
         writeGraph(req, pv.getId(), tenantId, userId);
 
-        log.info("ProcessdefEntity created code='{}' id={} v1={} (fe={}, sf={}, tf={})",
+        log.info("Processdef created code='{}' id={} v1={} (fe={}, sf={}, tf={})",
             pd.getCode(), pd.getId(), pv.getId(), feCount, sfCount, tfCount);
 
         return new CreateProcessdefResponse(pd.getId(), pv.getId(), 1,
             new CreateProcessdefResponse.Stats(feCount, sfCount, tfCount),
-            "ProcessdefEntity created", false);
+            "Processdef created", false);
     }
 
     /**
@@ -183,36 +175,24 @@ public class ProcessdefManagementService {
         // Flow elements → mapa code→id (para resolver source/target + taskforms)
         Map<String, UUID> feIdByCode = new LinkedHashMap<>();
         for (CreateProcessdefRequest.FlowElement fe : req.flowElements()) {
-            FlowelementEntity e = new FlowelementEntity();
-            e.setId(UUID.randomUUID());
-            e.setProcessversionId(processversionId);
-            e.setElementCode(fe.code());
-            e.setElementType(fe.type());
-            e.setName(fe.name());
-            e.setConfig(serializeConfig(fe.config()));
-            e.setSortOrder(fe.sortOrder());
-            e.setTenantId(tenantId);
-            e.setStateId(DEFAULT_STATE_ACTIVE);
-            e.setCreatedById(userId);
-            e.setOwnedById(userId);
+            UUID feId = UUID.randomUUID();
+            Flowelement e = new Flowelement(
+                feId, tenantId, processversionId, fe.code(), fe.type(), fe.name(),
+                serializeConfig(fe.config()), fe.sortOrder(), DEFAULT_STATE_ACTIVE,
+                null, null, userId, null, userId);
             flowelementRepository.save(e);
-            feIdByCode.put(fe.code(), e.getId());
+            feIdByCode.put(fe.code(), feId);
         }
 
         // Sequence flows (source/target resueltos del mapa)
         if (req.sequenceFlows() != null) {
             for (CreateProcessdefRequest.SequenceFlow sf : req.sequenceFlows()) {
-                SequenceflowEntity e = new SequenceflowEntity();
-                e.setId(UUID.randomUUID());
-                e.setProcessversionId(processversionId);
-                e.setSourceId(feIdByCode.get(sf.sourceCode()));   // no-null garantizado por validateRequest
-                e.setTargetId(feIdByCode.get(sf.targetCode()));
-                e.setConditionExpr(blankToNull(sf.conditionExpr()));
-                e.setSortOrder(sf.sortOrder());
-                e.setTenantId(tenantId);
-                e.setStateId(DEFAULT_STATE_ACTIVE);
-                e.setCreatedById(userId);
-                e.setOwnedById(userId);
+                Sequenceflow e = new Sequenceflow(
+                    UUID.randomUUID(), tenantId, processversionId,
+                    feIdByCode.get(sf.sourceCode()),   // no-null garantizado por validateRequest
+                    feIdByCode.get(sf.targetCode()),
+                    blankToNull(sf.conditionExpr()), sf.sortOrder(), null,
+                    DEFAULT_STATE_ACTIVE, null, null, userId, null, userId);
                 sequenceflowRepository.save(e);
             }
         }
@@ -220,15 +200,11 @@ public class ProcessdefManagementService {
         // Task forms (flowElementId del mapa; entitydefId resuelto s2s)
         if (req.taskForms() != null) {
             for (CreateProcessdefRequest.TaskForm tf : req.taskForms()) {
-                TaskformEntity e = new TaskformEntity();
-                e.setId(UUID.randomUUID());
-                e.setFlowelementId(feIdByCode.get(tf.flowElementCode()));
-                e.setEntitydefId(systemEntityResolver.resolveId(tf.entityDefCode(), tenantId));
-                e.setMode(tf.mode() == null || tf.mode().isBlank() ? "edit" : tf.mode());
-                e.setTenantId(tenantId);
-                e.setStateId(DEFAULT_STATE_ACTIVE);
-                e.setCreatedById(userId);
-                e.setOwnedById(userId);
+                Taskform e = new Taskform(
+                    UUID.randomUUID(), tenantId, feIdByCode.get(tf.flowElementCode()),
+                    systemEntityResolver.resolveId(tf.entityDefCode(), tenantId),
+                    tf.mode() == null || tf.mode().isBlank() ? "edit" : tf.mode(),
+                    DEFAULT_STATE_ACTIVE, null, null, userId, null, userId);
                 taskformRepository.save(e);
             }
         }
@@ -257,9 +233,9 @@ public class ProcessdefManagementService {
         boolean dryRun = Boolean.TRUE.equals(req.dryRun());
 
         // 1. Verificar existencia (null → el controller devuelve 404)
-        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) {
-            throw new IllegalArgumentException("ProcessdefEntity not found: " + processdefId);
+            throw new IllegalArgumentException("Processdef not found: " + processdefId);
         }
 
         // 2. Code es IMMUTABLE
@@ -291,26 +267,26 @@ public class ProcessdefManagementService {
         }
 
         // 5. Resolver la current processversion (puntero, o la única si el puntero está vacío)
-        ProcessversionEntity pv = null;
+        Processversion pv = null;
         if (pd.getCurrentversionId() != null) {
             pv = processversionRepository.findById(pd.getCurrentversionId()).orElse(null);
         }
         if (pv == null) {
-            List<ProcessversionEntity> versions = processversionRepository
+            List<Processversion> versions = processversionRepository
                 .findByProcessdefIdOrderByVersionDesc(processdefId);
             if (!versions.isEmpty()) pv = versions.get(0);
         }
         if (pv == null) {
-            throw new IllegalStateException("ProcessversionEntity not found for processdef " + processdefId);
+            throw new IllegalStateException("Processversion not found for processdef " + processdefId);
         }
         UUID pvId = pv.getId();
 
         // 6. Borrar shape existente de la version (taskforms → sequenceflows → flowelements)
         //    Los taskforms cuelgan de los flowelements, así que se borran ANTES.
-        List<FlowelementEntity> existingFe = flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
+        List<Flowelement> existingFe = flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
         if (!existingFe.isEmpty()) {
             List<UUID> feIds = new ArrayList<>(existingFe.size());
-            for (FlowelementEntity fe : existingFe) feIds.add(fe.getId());
+            for (Flowelement fe : existingFe) feIds.add(fe.getId());
             taskformRepository.deleteByFlowelementIdIn(feIds);
         }
         sequenceflowRepository.deleteByProcessversionId(pvId);
@@ -320,17 +296,16 @@ public class ProcessdefManagementService {
         writeGraph(req, pvId, tenantId, userId);
 
         // 8. Actualizar header del processdef (code NO se toca — ya validado immutable).
-        //    Cargamos la entity existente (ya tiene created_at de la DB) → el UPDATE preserva created_at.
+        //    Reconstruimos el modelo preservando created_at + puntero currentversion existentes.
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        pd.setName(req.header().name());
-        pd.setDescription(req.header().description());
-        pd.setLifecycle(req.header().lifecycle());
-        pd.setStartPermission(blankToNull(req.header().startPermission()));
-        pd.setUpdatedById(userId);
-        pd.setUpdatedAt(now);
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), req.header().name(),
+            req.header().description(), pd.getCurrentversionId(), req.header().lifecycle(),
+            blankToNull(req.header().startPermission()), pd.getStateId(),
+            pd.getCreatedAt(), now, pd.getCreatedById(), userId, pd.getOwnedById());
         processdefRepository.save(pd);
 
-        log.info("ProcessdefEntity updated — code='{}' processdefId={} pv={} fe={} sf={} tf={}",
+        log.info("Processdef updated — code='{}' processdefId={} pv={} fe={} sf={} tf={}",
             pd.getCode(), processdefId, pvId, feCount, sfCount, tfCount);
 
         return new CreateProcessdefResponse(processdefId, pvId,
@@ -345,15 +320,18 @@ public class ProcessdefManagementService {
      * Carga la entity existente (preserva created_at) y solo modifica lifecycle + updated_at.
      */
     public void softDelete(UUID processdefId, UUID userId) {
-        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) {
-            throw new IllegalArgumentException("ProcessdefEntity not found: " + processdefId);
+            throw new IllegalArgumentException("Processdef not found: " + processdefId);
         }
-        pd.setLifecycle("inactive");
-        pd.setUpdatedById(userId);
-        pd.setUpdatedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), pd.getName(),
+            pd.getDescription(), pd.getCurrentversionId(), "inactive",
+            pd.getStartPermission(), pd.getStateId(),
+            pd.getCreatedAt(), OffsetDateTime.now(ZoneOffset.UTC),
+            pd.getCreatedById(), userId, pd.getOwnedById());
         processdefRepository.save(pd);
-        log.info("ProcessdefEntity {} soft-deleted (lifecycle=inactive)", processdefId);
+        log.info("Processdef {} soft-deleted (lifecycle=inactive)", processdefId);
     }
 
     /**
@@ -371,9 +349,9 @@ public class ProcessdefManagementService {
         boolean dryRun = Boolean.TRUE.equals(req.dryRun());
 
         // 1. Verificar existencia
-        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) {
-            throw new IllegalArgumentException("ProcessdefEntity not found: " + processdefId);
+            throw new IllegalArgumentException("Processdef not found: " + processdefId);
         }
 
         // 2. Code immutable (las versions de un mismo processdef comparten code)
@@ -387,7 +365,7 @@ public class ProcessdefManagementService {
         validateRequest(req, true, tenantId);
 
         // 4. version = max(existing) + 1
-        List<ProcessversionEntity> versions = processversionRepository
+        List<Processversion> versions = processversionRepository
             .findByProcessdefIdOrderByVersionDesc(processdefId);
         int currentMaxVer = 0;
         if (!versions.isEmpty() && versions.get(0).getVersion() != null) {
@@ -408,32 +386,22 @@ public class ProcessdefManagementService {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
 
         // 5. Crear la nueva processversion (single-INSERT)
-        ProcessversionEntity pv = new ProcessversionEntity();
-        pv.setId(UUID.randomUUID());
-        pv.setProcessdefId(processdefId);
-        pv.setVersion(newVer);
-        pv.setPublishedAt(now);
-        pv.setDefinition("{}");
-        pv.setLocked(true);
-        pv.setDescription("v" + newVer + " of " + req.header().code());
-        pv.setTenantId(tenantId);
-        pv.setStateId(DEFAULT_STATE_ACTIVE);
-        pv.setCreatedById(userId);
-        pv.setOwnedById(userId);
-        processversionRepository.save(pv);
+        Processversion pv = new Processversion(
+            UUID.randomUUID(), tenantId, processdefId, newVer, now, "{}", true,
+            "v" + newVer + " of " + req.header().code(), DEFAULT_STATE_ACTIVE,
+            now, null, userId, null, userId);
+        pv = processversionRepository.save(pv);
 
         // 6. Grafo de la nueva version
         writeGraph(req, pv.getId(), tenantId, userId);
 
         // 7. Header del processdef puede haber cambiado (name/description/lifecycle);
-        //    code NO. Cargamos la entity existente → preserva created_at. Puntero al nuevo.
-        pd.setName(req.header().name());
-        pd.setDescription(req.header().description());
-        pd.setLifecycle(req.header().lifecycle());
-        pd.setStartPermission(blankToNull(req.header().startPermission()));
-        pd.setCurrentversionId(pv.getId());
-        pd.setUpdatedById(userId);
-        pd.setUpdatedAt(now);
+        //    code NO. Reconstruimos el modelo preservando created_at. Puntero al nuevo.
+        pd = new Processdef(
+            pd.getId(), pd.getTenantId(), pd.getCode(), req.header().name(),
+            req.header().description(), pv.getId(), req.header().lifecycle(),
+            blankToNull(req.header().startPermission()), pd.getStateId(),
+            pd.getCreatedAt(), now, pd.getCreatedById(), userId, pd.getOwnedById());
         processdefRepository.save(pd);
 
         log.info("Published v{} of processdef code='{}' processdefId={} newPv={} fe={} sf={} tf={}",
@@ -453,9 +421,9 @@ public class ProcessdefManagementService {
      * currentVersionId, versionCount.
      */
     public List<Map<String, Object>> listAll(UUID tenantId) {
-        List<ProcessdefEntity> defs = processdefRepository.findByTenantIdOrderByCode(tenantId);
+        List<Processdef> defs = processdefRepository.findByTenantIdOrderByCode(tenantId);
         List<Map<String, Object>> out = new ArrayList<>(defs.size());
-        for (ProcessdefEntity pd : defs) {
+        for (Processdef pd : defs) {
             int versionCount = processversionRepository
                 .findByProcessdefIdOrderByVersionDesc(pd.getId()).size();
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -479,29 +447,29 @@ public class ProcessdefManagementService {
      * reuso 1:1 en el builder del frontend. Devuelve null si no existe.
      */
     public Map<String, Object> getDetail(UUID processdefId) {
-        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         if (pd == null) return null;
 
         // currentversion (o última si el puntero está vacío)
-        ProcessversionEntity pv = null;
+        Processversion pv = null;
         if (pd.getCurrentversionId() != null) {
             pv = processversionRepository.findById(pd.getCurrentversionId()).orElse(null);
         }
         if (pv == null) {
-            List<ProcessversionEntity> versions = processversionRepository
+            List<Processversion> versions = processversionRepository
                 .findByProcessdefIdOrderByVersionDesc(processdefId);
             if (!versions.isEmpty()) pv = versions.get(0);
         }
         UUID pvId = pv == null ? null : pv.getId();
 
         // Grafo (id→code para resolver source/target de las aristas)
-        List<FlowelementEntity> feEntities = pvId == null ? List.of()
+        List<Flowelement> feEntities = pvId == null ? List.of()
             : flowelementRepository.findByProcessversionIdOrderBySortOrder(pvId);
         Map<UUID, String> codeById = new HashMap<>();
-        for (FlowelementEntity fe : feEntities) codeById.put(fe.getId(), fe.getElementCode());
+        for (Flowelement fe : feEntities) codeById.put(fe.getId(), fe.getElementCode());
 
         List<Map<String, Object>> flowElements = new ArrayList<>();
-        for (FlowelementEntity fe : feEntities) {
+        for (Flowelement fe : feEntities) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("code", fe.getElementCode());
             m.put("name", fe.getName());
@@ -513,7 +481,7 @@ public class ProcessdefManagementService {
 
         List<Map<String, Object>> sequenceFlows = new ArrayList<>();
         if (pvId != null) {
-            for (SequenceflowEntity sf : sequenceflowRepository.findByProcessversionIdOrderBySortOrder(pvId)) {
+            for (Sequenceflow sf : sequenceflowRepository.findByProcessversionIdOrderBySortOrder(pvId)) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("sourceCode", codeById.get(sf.getSourceId()));
                 m.put("targetCode", codeById.get(sf.getTargetId()));
@@ -526,7 +494,7 @@ public class ProcessdefManagementService {
         List<Map<String, Object>> taskForms = new ArrayList<>();
         if (!codeById.isEmpty()) {
             List<UUID> feIds = new ArrayList<>(codeById.keySet());
-            for (TaskformEntity tf : taskformRepository.findByFlowelementIdIn(feIds)) {
+            for (Taskform tf : taskformRepository.findByFlowelementIdIn(feIds)) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("flowElementCode", codeById.get(tf.getFlowelementId()));
                 // entityDefId es la FK local; entityDefCode se resuelve s2s (el builder trabaja por code).
@@ -562,17 +530,17 @@ public class ProcessdefManagementService {
      * queries LOCALES en bpm (F4-mgmt disolvió el SQL cross-service que hacía system).
      */
     public List<Map<String, Object>> listVersions(UUID processdefId) {
-        ProcessdefEntity pd = processdefRepository.findById(processdefId).orElse(null);
+        Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         UUID currentVerId = pd == null ? null : pd.getCurrentversionId();
 
-        List<ProcessversionEntity> versions = processversionRepository
+        List<Processversion> versions = processversionRepository
             .findByProcessdefIdOrderByVersionDesc(processdefId);
         // asc por version (el finder devuelve desc)
         versions.sort(Comparator.comparing(
             v -> v.getVersion() == null ? 0 : v.getVersion()));
 
         List<Map<String, Object>> out = new ArrayList<>(versions.size());
-        for (ProcessversionEntity v : versions) {
+        for (Processversion v : versions) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("processversionId", v.getId().toString());
             m.put("version", v.getVersion() == null ? 0 : v.getVersion());
@@ -780,17 +748,5 @@ public class ProcessdefManagementService {
         } catch (Exception e) {
             return Map.of();
         }
-    }
-
-    /** Setea el núcleo audit-7 (bpm no setea GUC de user → explícito). */
-    private void stampAudit(java.util.function.Consumer<UUID> setTenant,
-                            java.util.function.Consumer<UUID> setState,
-                            java.util.function.Consumer<UUID> setCreatedBy,
-                            java.util.function.Consumer<UUID> setOwnedBy,
-                            UUID tenantId, UUID userId) {
-        setTenant.accept(tenantId);
-        setState.accept(DEFAULT_STATE_ACTIVE);
-        setCreatedBy.accept(userId);
-        setOwnedBy.accept(userId);
     }
 }

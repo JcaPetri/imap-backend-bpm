@@ -16,14 +16,17 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.ProcessversionEntity;
+import com.imap.bpm.infrastructure.entity.SequenceflowEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
-public interface ProcessversionRepository extends JpaRepository<ProcessversionEntity, UUID> {
-    List<ProcessversionEntity> findByProcessdefIdOrderByVersionDesc(UUID processdefId);
-    Optional<ProcessversionEntity> findByTenantIdAndProcessdefIdAndVersion(UUID tenantId, UUID processdefId, Integer version);
+public interface SequenceflowJpaRepository extends JpaRepository<SequenceflowEntity, UUID> {
+    List<SequenceflowEntity> findByProcessversionIdOrderBySortOrder(UUID processversionId);
+
+    /** F4-mgmt update: borra los sequenceflows de la version antes de recrear su shape (bulk inmediato). */
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query("delete from SequenceflowEntity s where s.processversionId = ?1")
+    int deleteByProcessversionId(UUID processversionId);
 }

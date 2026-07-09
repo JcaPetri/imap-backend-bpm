@@ -14,16 +14,22 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.infrastructure.repository;
+package com.imap.bpm.domain.port.out;
 
-import com.imap.bpm.infrastructure.entity.ProcessdefEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
+import com.imap.bpm.domain.model.Processversion;
 
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
-public interface ProcessdefRepository extends JpaRepository<ProcessdefEntity, UUID> {
-    Optional<ProcessdefEntity> findByTenantIdAndCode(UUID tenantId, String code);
-    List<ProcessdefEntity> findByTenantIdOrderByCode(UUID tenantId);
+/** Puerto de salida: processversions (V015). Devuelve dominio. */
+public interface ProcessversionRepository {
+
+    List<Processversion> findByProcessdefIdOrderByVersionDesc(UUID processdefId);
+
+    Optional<Processversion> findByTenantIdAndProcessdefIdAndVersion(UUID tenantId, UUID processdefId, Integer version);
+
+    Optional<Processversion> findById(UUID id);
+
+    Processversion save(Processversion model);
 }

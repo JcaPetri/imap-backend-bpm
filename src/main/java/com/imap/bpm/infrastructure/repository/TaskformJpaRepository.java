@@ -16,17 +16,17 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.SequenceflowEntity;
+import com.imap.bpm.infrastructure.entity.TaskformEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
 import java.util.UUID;
 
-public interface SequenceflowRepository extends JpaRepository<SequenceflowEntity, UUID> {
-    List<SequenceflowEntity> findByProcessversionIdOrderBySortOrder(UUID processversionId);
+public interface TaskformJpaRepository extends JpaRepository<TaskformEntity, UUID> {
+    List<TaskformEntity> findByFlowelementIdIn(List<UUID> flowelementIds);
 
-    /** F4-mgmt update: borra los sequenceflows de la version antes de recrear su shape (bulk inmediato). */
+    /** F4-mgmt update: borra los taskforms colgados de esos flowelements (bulk inmediato). */
     @org.springframework.data.jpa.repository.Modifying
-    @org.springframework.data.jpa.repository.Query("delete from SequenceflowEntity s where s.processversionId = ?1")
-    int deleteByProcessversionId(UUID processversionId);
+    @org.springframework.data.jpa.repository.Query("delete from TaskformEntity t where t.flowelementId in ?1")
+    int deleteByFlowelementIdIn(List<UUID> flowelementIds);
 }

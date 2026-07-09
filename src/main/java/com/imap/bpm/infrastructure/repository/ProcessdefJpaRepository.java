@@ -16,17 +16,14 @@
 
 package com.imap.bpm.infrastructure.repository;
 
-import com.imap.bpm.infrastructure.entity.TaskformEntity;
+import com.imap.bpm.infrastructure.entity.ProcessdefEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
-public interface TaskformRepository extends JpaRepository<TaskformEntity, UUID> {
-    List<TaskformEntity> findByFlowelementIdIn(List<UUID> flowelementIds);
-
-    /** F4-mgmt update: borra los taskforms colgados de esos flowelements (bulk inmediato). */
-    @org.springframework.data.jpa.repository.Modifying
-    @org.springframework.data.jpa.repository.Query("delete from TaskformEntity t where t.flowelementId in ?1")
-    int deleteByFlowelementIdIn(List<UUID> flowelementIds);
+public interface ProcessdefJpaRepository extends JpaRepository<ProcessdefEntity, UUID> {
+    Optional<ProcessdefEntity> findByTenantIdAndCode(UUID tenantId, String code);
+    List<ProcessdefEntity> findByTenantIdOrderByCode(UUID tenantId);
 }

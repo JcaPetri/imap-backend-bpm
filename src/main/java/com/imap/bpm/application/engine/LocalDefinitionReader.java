@@ -46,20 +46,20 @@ public class LocalDefinitionReader {
     /** Defs de plataforma. Un decisiondef SYSTEM_TENANT sirve a todos los tenants (como en system). */
     private static final UUID SYSTEM_TENANT = UUID.fromString("00000000-0000-0000-0000-000000000001");
 
-    private final ProcessdefRepository processdefRepo;
-    private final ProcessversionRepository processversionRepo;
-    private final FlowelementRepository flowelementRepo;
-    private final SequenceflowRepository sequenceflowRepo;
-    private final TaskformRepository taskformRepo;
+    private final ProcessdefJpaRepository processdefRepo;
+    private final ProcessversionJpaRepository processversionRepo;
+    private final FlowelementJpaRepository flowelementRepo;
+    private final SequenceflowJpaRepository sequenceflowRepo;
+    private final TaskformJpaRepository taskformRepo;
     private final DecisiondefRepository decisiondefRepo;
     private final DmnRuleRepository dmnRuleRepo;
     private final ObjectMapper mapper;
 
-    public LocalDefinitionReader(ProcessdefRepository processdefRepo,
-                                 ProcessversionRepository processversionRepo,
-                                 FlowelementRepository flowelementRepo,
-                                 SequenceflowRepository sequenceflowRepo,
-                                 TaskformRepository taskformRepo,
+    public LocalDefinitionReader(ProcessdefJpaRepository processdefRepo,
+                                 ProcessversionJpaRepository processversionRepo,
+                                 FlowelementJpaRepository flowelementRepo,
+                                 SequenceflowJpaRepository sequenceflowRepo,
+                                 TaskformJpaRepository taskformRepo,
                                  DecisiondefRepository decisiondefRepo,
                                  DmnRuleRepository dmnRuleRepo,
                                  ObjectMapper mapper) {

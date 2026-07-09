@@ -21,11 +21,11 @@ import com.imap.bpm.domain.model.Migrationplan;
 import com.imap.bpm.domain.model.Migrationrule;
 import com.imap.bpm.domain.port.out.MigrationplanRepository;
 import com.imap.bpm.domain.port.out.MigrationruleRepository;
-import com.imap.bpm.infrastructure.entity.FlowelementEntity;
-import com.imap.bpm.infrastructure.entity.ProcessversionEntity;
-import com.imap.bpm.infrastructure.repository.FlowelementRepository;
+import com.imap.bpm.domain.model.Flowelement;
+import com.imap.bpm.domain.model.Processversion;
+import com.imap.bpm.domain.port.out.FlowelementRepository;
 import com.imap.bpm.infrastructure.repository.ProcessInstanceRepository;
-import com.imap.bpm.infrastructure.repository.ProcessversionRepository;
+import com.imap.bpm.domain.port.out.ProcessversionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -399,17 +399,17 @@ public class MigrationPlanManagementService {
 
     /** Codes de los flowElements de una processversion (LOCAL — antes system leía cells). */
     private List<String> loadFlowElementCodes(UUID processversionId) {
-        List<FlowelementEntity> elements = flowelementRepository
+        List<Flowelement> elements = flowelementRepository
             .findByProcessversionIdOrderBySortOrder(processversionId);
         List<String> out = new ArrayList<>(elements.size());
-        for (FlowelementEntity fe : elements) out.add(fe.getElementCode());
+        for (Flowelement fe : elements) out.add(fe.getElementCode());
         return out;
     }
 
     /** processdef_id de una processversion (para el filtro de listPlans). */
     private UUID lookupProcessdefIdOfPv(UUID pvId) {
         if (pvId == null) return null;
-        ProcessversionEntity pv = processversionRepository.findById(pvId).orElse(null);
+        Processversion pv = processversionRepository.findById(pvId).orElse(null);
         return pv == null ? null : pv.getProcessdefId();
     }
 

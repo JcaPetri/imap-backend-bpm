@@ -14,21 +14,22 @@
 //  • [bpm] Camunda 8 como norte; interim form-driven en prod
 // ─── GOLDEN-RULES:END ───
 
-package com.imap.bpm.infrastructure.repository;
+package com.imap.bpm.domain.port.out;
 
-import com.imap.bpm.infrastructure.entity.FlowelementEntity;
-import org.springframework.data.jpa.repository.JpaRepository;
+import com.imap.bpm.domain.model.Taskform;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
-public interface FlowelementRepository extends JpaRepository<FlowelementEntity, UUID> {
-    List<FlowelementEntity> findByProcessversionIdOrderBySortOrder(UUID processversionId);
+/** Puerto de salida: taskforms (V015). Devuelve dominio. */
+public interface TaskformRepository {
 
-    /** F4-mgmt update: borra los flowelements de la version antes de recrear su shape.
-     *  Bulk @Modifying (ejecución inmediata) — un deleteBy derivado es find-then-remove
-     *  diferido y Hibernate ordena INSERTS antes que DELETES en el flush → colisión uq. */
-    @org.springframework.data.jpa.repository.Modifying
-    @org.springframework.data.jpa.repository.Query("delete from FlowelementEntity f where f.processversionId = ?1")
-    int deleteByProcessversionId(UUID processversionId);
+    List<Taskform> findByFlowelementIdIn(List<UUID> flowelementIds);
+
+    int deleteByFlowelementIdIn(List<UUID> flowelementIds);
+
+    Optional<Taskform> findById(UUID id);
+
+    Taskform save(Taskform model);
 }
