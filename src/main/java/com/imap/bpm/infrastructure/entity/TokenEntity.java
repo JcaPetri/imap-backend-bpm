@@ -62,6 +62,11 @@ public class TokenEntity {
     @Column(name = "entered_at", nullable = false)
     private OffsetDateTime enteredAt;
 
+    // Multi-instance (parallel): en el token ANCLA guarda N (cantidad de
+    // ejecuciones esperadas) para el join por cardinalidad. NULL = token normal.
+    @Column(name = "mi_cardinality")
+    private Integer miCardinality;
+
     @Column(name = "state_id", nullable = false)        private UUID stateId;
     @Column(name = "created_at", nullable = false, updatable = false)      private OffsetDateTime createdAt;
     @Column(name = "updated_at", nullable = false)      private OffsetDateTime updatedAt;
@@ -85,6 +90,8 @@ public class TokenEntity {
     public void setLifecycle(String s)        { this.lifecycle = s; }
     public OffsetDateTime getEnteredAt()      { return enteredAt; }
     public void setEnteredAt(OffsetDateTime t){ this.enteredAt = t; }
+    public Integer getMiCardinality()         { return miCardinality; }
+    public void setMiCardinality(Integer n)   { this.miCardinality = n; }
 
     public UUID getStateId()                  { return stateId; }
     public void setStateId(UUID id)           { this.stateId = id; }

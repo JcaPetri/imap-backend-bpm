@@ -599,6 +599,7 @@ public class ProcessdefManagementService {
                 throw new IllegalArgumentException(
                     "duplicate flowElement code '" + fe.code() + "' within this processdef");
             }
+            validateMultiInstance(fe);
         }
 
         // Topología: ≥1 start, ≥1 end
@@ -710,6 +711,44 @@ public class ProcessdefManagementService {
         if (balance != 0) {
             throw new IllegalArgumentException(
                 "unbalanced parens in conditionExpr @" + location + ": '" + expr + "'");
+        }
+    }
+
+    /**
+     * Multi-instance parallel MVP: valida el bloque config.multiInstance si esta
+     * presente. Solo permitido sobre user_task / sub_process; requiere collection
+     * + elementVar; mode debe ser "parallel" (sequential se difiere, ver doc §8).
+     */
+    @SuppressWarnings("unchecked")
+    private void validateMultiInstance(CreateProcessdefRequest.FlowElement fe) {
+        if (fe.config() == null) return;
+        Object miObj = fe.config().get("multiInstance");
+        if (miObj == null) return;
+        if (!(miObj instanceof Map)) {
+            throw new IllegalArgumentException(
+                "multiInstance config must be an object @flowElement '" + fe.code() + "'");
+        }
+        if (!"user_task".equals(fe.type()) && !"sub_process".equals(fe.type())) {
+            throw new IllegalArgumentException(
+                "multiInstance only supported on user_task / sub_process, not '" + fe.type()
+                + "' @flowElement '" + fe.code() + "'");
+        }
+        Map<String, Object> mi = (Map<String, Object>) miObj;
+        Object collection = mi.get("collection");
+        if (!(collection instanceof String s) || s.isBlank()) {
+            throw new IllegalArgumentException(
+                "multiInstance.collection is required @flowElement '" + fe.code() + "'");
+        }
+        Object elementVar = mi.get("elementVar");
+        if (!(elementVar instanceof String ev) || ev.isBlank()) {
+            throw new IllegalArgumentException(
+                "multiInstance.elementVar is required @flowElement '" + fe.code() + "'");
+        }
+        Object mode = mi.get("mode");
+        if (mode != null && !"parallel".equals(mode)) {
+            throw new IllegalArgumentException(
+                "multiInstance.mode '" + mode + "' not supported (MVP=parallel) @flowElement '"
+                + fe.code() + "'");
         }
     }
 
