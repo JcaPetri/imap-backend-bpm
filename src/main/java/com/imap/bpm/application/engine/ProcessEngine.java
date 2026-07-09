@@ -354,8 +354,16 @@ public class ProcessEngine {
             .orElseThrow(() -> new IllegalStateException(
                 "ProcessInstanceEntity not found for task: " + taskInstanceId));
 
-        // Merge outputData en variables del processinstance
-        if (outputData != null) {
+        // ¿Es una task de una activity multi-instanciada? Su token es hijo de un
+        // token ancla (parentTokenId) con mi_cardinality != null, ambos parados
+        // en el mismo element. En ese caso NO mergeamos el output a las vars
+        // globales (cada item es independiente) y desviamos al join por cardinalidad.
+        TokenEntity token = task.getTokenId() != null
+            ? tokenRepo.findById(task.getTokenId()).orElse(null) : null;
+        TokenEntity miAnchor = miAnchorOf(token);
+
+        // Merge outputData en variables del processinstance (solo path normal)
+        if (miAnchor == null && outputData != null) {
             for (Map.Entry<String, Object> e : outputData.entrySet()) {
                 setVariable(instance, e.getKey(), e.getValue());
             }
@@ -374,21 +382,24 @@ public class ProcessEngine {
             }
         }
 
+        // Multi-instance: consumir el token hijo + join por cardinalidad.
+        if (miAnchor != null) {
+            completeMultiInstanceChild(instance, token, miAnchor, outputData, bearerToken, userId);
+            return task;
+        }
+
         // Avanza el token: el current element es el user_task que se acaba de
         // completar. Reactivamos el token (estaba 'waiting') y CONSUMIMOS el
         // current element pasando al siguiente — sino advanceToken vería el
         // user_task otra vez y crearía OTRA TaskInstanceEntity (bug catched 2026-05-17).
-        if (task.getTokenId() != null) {
-            TokenEntity token = tokenRepo.findById(task.getTokenId()).orElse(null);
-            if (token != null && "waiting".equals(token.getLifecycle())) {
-                token.setLifecycle("active");
-                token.setUpdatedAt(now);
-                tokenRepo.save(token);
-                ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
-                ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
-                if (current != null) {
-                    consumeAndMoveToNext(instance, token, current, def, userId);
-                }
+        if (token != null && "waiting".equals(token.getLifecycle())) {
+            token.setLifecycle("active");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
+            ProcessDefinition.FlowElement current = def.findElementById(token.getCurrentElementId());
+            if (current != null) {
+                consumeAndMoveToNext(instance, token, current, def, userId);
             }
         }
         return task;
@@ -416,7 +427,11 @@ public class ProcessEngine {
                 break;
 
             case "user_task":
-                handleUserTask(instance, token, current, def, userId);
+                if (current.hasMultiInstance()) {
+                    handleMultiInstanceSplit(instance, token, current, def, userId);
+                } else {
+                    handleUserTask(instance, token, current, def, userId);
+                }
                 break;
 
             case "service_task":
@@ -436,7 +451,11 @@ public class ProcessEngine {
                 break;
 
             case "sub_process":
-                handleSubProcess(instance, token, current, def, userId);
+                if (current.hasMultiInstance()) {
+                    handleMultiInstanceSplit(instance, token, current, def, userId);
+                } else {
+                    handleSubProcess(instance, token, current, def, userId);
+                }
                 break;
 
             case "business_rule_task":
@@ -1572,6 +1591,16 @@ public class ProcessEngine {
             return;
         }
 
+        // Multi-instance: si el parentToken es un hijo de MI (su parentTokenId es
+        // el token ancla), no reactivamos+avanzamos — desviamos al join por
+        // cardinalidad. El output del child = sus returnVariables (para outputCollection).
+        TokenEntity miAnchor = miAnchorOf(parentToken);
+        if (miAnchor != null) {
+            Map<String, Object> childOutput = extractReturnVars(subProcessElement, child);
+            completeMultiInstanceChild(parent, parentToken, miAnchor, childOutput, null, userId);
+            return;
+        }
+
         // Copia returnVariables del child al parent
         Map<String, Object> cfg = subProcessElement.config();
         Map<String, Object> callCfg = cfg == null ? null
@@ -1602,6 +1631,289 @@ public class ProcessEngine {
             ));
 
         consumeAndMoveToNext(parent, parentToken, subProcessElement, parentDef, userId);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Multi-instance parallel (MVP) — marcador sobre user_task / sub_process
+    //
+    // Un token entra a la activity marcada con config.multiInstance. Se hace
+    // fan-out de N ejecuciones (una por item de una coleccion de runtime): el
+    // token que entro queda como ANCLA (mi_cardinality=N, lifecycle=waiting) y
+    // se crean N tokens hijos que ejecutan el cuerpo de la activity. Cuando los
+    // N terminan (join por cardinalidad, anti-race con lock del ancla), el ancla
+    // avanza al unico outgoing.
+    //
+    // Reusa el modelo probado de parallel_gateway (fan-out por parent_token_id)
+    // y sub_process (spawn hijo + notifyParent). El item viaja por el input_data
+    // de la task (user_task) o el payload de la instancia hija (sub_process) — no
+    // se introduce scope de variable global por token en el MVP.
+    // Diferido (ver IMAP_MOTOR_BPM.md §8): sequential MI + completionCondition.
+    // ════════════════════════════════════════════════════════════════════════
+
+    @SuppressWarnings("unchecked")
+    private void handleMultiInstanceSplit(ProcessInstanceEntity instance, TokenEntity anchor,
+                                          ProcessDefinition.FlowElement activity,
+                                          ProcessDefinition def, UUID userId) {
+        Map<String, Object> mi = activity.multiInstance();
+        String collectionExpr = stringOr(mi.get("collection"), null);
+        String elementVar = stringOr(mi.get("elementVar"), "item");
+        String mode = stringOr(mi.get("mode"), "parallel");
+
+        // MVP: solo parallel. sequential se difiere (ver doc §8).
+        if (!"parallel".equals(mode)) {
+            log.warn("multiInstance '{}' mode '{}' no soportado (MVP=parallel) — passthrough",
+                activity.code(), mode);
+            audit(instance, "mi.unsupported_mode", activity.id(), anchor.getId(), userId,
+                Map.of("elementCode", activity.code(), "mode", mode));
+            consumeAndMoveToNext(instance, anchor, activity, def, userId);
+            return;
+        }
+
+        List<Object> items = resolveCollectionValue(instance, collectionExpr);
+        int n = items.size();
+
+        // Coleccion vacia → skip la activity (semantica BPMN: 0 instancias).
+        if (n == 0) {
+            audit(instance, "mi.empty", activity.id(), anchor.getId(), userId,
+                Map.of("elementCode", activity.code(),
+                       "collection", collectionExpr == null ? "(null)" : collectionExpr));
+            consumeAndMoveToNext(instance, anchor, activity, def, userId);
+            return;
+        }
+
+        // El ancla queda esperando; guarda N para el join por cardinalidad.
+        OffsetDateTime now = OffsetDateTime.now();
+        anchor.setMiCardinality(n);
+        anchor.setLifecycle("waiting");
+        anchor.setUpdatedAt(now);
+        tokenRepo.save(anchor);
+
+        audit(instance, "mi.split", activity.id(), anchor.getId(), userId, Map.of(
+            "elementCode", activity.code(),
+            "mode", mode,
+            "cardinality", n,
+            "elementVar", elementVar));
+        metricInc("bpm.mi.split", def);
+        log.info("multiInstance '{}' split → {} ejecuciones (elementVar={})",
+            activity.code(), n, elementVar);
+
+        // Fan-out: 1 token hijo por item, ejecuta el cuerpo de la activity.
+        for (int i = 0; i < n; i++) {
+            Object item = items.get(i);
+            TokenEntity child = newToken(instance, activity.id(), anchor.getId());
+            child.setLifecycle("waiting");   // espera la completacion del cuerpo
+            tokenRepo.save(child);
+
+            Map<String, Object> loopCtx = new LinkedHashMap<>();
+            loopCtx.put(elementVar, item);
+            loopCtx.put("loopCounter", i);
+            loopCtx.put("nrOfInstances", n);
+
+            if ("user_task".equals(activity.type())) {
+                createMiUserTask(instance, child, activity, def, loopCtx, userId);
+            } else { // sub_process
+                spawnMiSubprocess(instance, child, activity, def, loopCtx, userId);
+            }
+            audit(instance, "mi.instance.created", activity.id(), child.getId(), userId,
+                Map.of("elementCode", activity.code(), "index", i));
+        }
+    }
+
+    /** Crea la TaskInstanceEntity de UNA ejecucion MI (mirror de handleUserTask, con item en el input_data). */
+    private void createMiUserTask(ProcessInstanceEntity instance, TokenEntity childToken,
+                                  ProcessDefinition.FlowElement userTask, ProcessDefinition def,
+                                  Map<String, Object> loopCtx, UUID userId) {
+        Map<String, Object> inputData = currentVariablesAsMap(instance);
+        inputData.putAll(loopCtx);   // item + loopCounter + nrOfInstances
+
+        OffsetDateTime now = OffsetDateTime.now();
+        TaskInstanceEntity task = new TaskInstanceEntity();
+        task.setId(UUID.randomUUID());
+        task.setTenantId(instance.getTenantId());
+        task.setProcessinstanceId(instance.getId());
+        task.setFlowelementId(userTask.id());
+        task.setTokenId(childToken.getId());
+        task.setLifecycle("created");
+        task.setPriority(50);
+        task.setInputData(inputData);
+        String candidateGroup = taskAssignmentService.resolveCandidateGroup(
+            userTask.config(), inputData, instance.getTenantId());
+        if (candidateGroup != null) {
+            task.setAssignedRole(candidateGroup);
+        } else {
+            UUID assignee = taskAssignmentService.resolveAssignee(
+                def.processdefCode(), userTask.code(),
+                instance.getStartedById(), instance.getTenantId());
+            task.setAssignedUserId(assignee);
+            task.setAssignedAt(now);
+        }
+        task.setStateId(DEFAULT_STATE_ACTIVE);
+        task.setCreatedAt(now);
+        task.setUpdatedAt(now);
+        taskRepo.save(task);
+        metricInc("bpm.task.created", def);
+    }
+
+    /** Spawnea la instancia hija de UNA ejecucion MI (mirror de handleSubProcess, con item en el payload). */
+    @SuppressWarnings("unchecked")
+    private void spawnMiSubprocess(ProcessInstanceEntity instance, TokenEntity childToken,
+                                   ProcessDefinition.FlowElement subProcess, ProcessDefinition def,
+                                   Map<String, Object> loopCtx, UUID userId) {
+        Map<String, Object> cfg = subProcess.config();
+        Map<String, Object> callCfg = cfg == null ? null : (Map<String, Object>) cfg.get("callActivity");
+        if (callCfg == null) {
+            log.warn("multiInstance sub_process '{}' sin callActivity — consumiendo token hijo", subProcess.code());
+            childToken.setLifecycle("consumed");
+            tokenRepo.save(childToken);
+            return;
+        }
+        String calledVerId = stringOr(callCfg.get("calledProcessversionId"), null);
+        UUID calledProcessVersionId;
+        try {
+            calledProcessVersionId = UUID.fromString(calledVerId);
+        } catch (Exception e) {
+            log.error("multiInstance sub_process '{}' calledProcessversionId invalido: {}",
+                subProcess.code(), calledVerId);
+            childToken.setLifecycle("consumed");
+            tokenRepo.save(childToken);
+            return;
+        }
+        Map<String, Object> parentVars = currentVariablesAsMap(instance);
+        Map<String, Object> childPayload = new LinkedHashMap<>();
+        if (callCfg.get("passVariables") instanceof List<?> list) {
+            for (Object v : list) {
+                String name = String.valueOf(v);
+                if (parentVars.containsKey(name)) childPayload.put(name, parentVars.get(name));
+            }
+        }
+        childPayload.putAll(loopCtx);   // item + loopCounter + nrOfInstances
+        // parent_token_id = childToken.id → al terminar, notifyParent vuelve por acá.
+        startProcessInternal(calledProcessVersionId, childPayload, null,
+            instance.getTenantId(), userId, instance.getId(), childToken.getId());
+    }
+
+    /**
+     * Join por cardinalidad de una activity multi-instanciada. Anti-race: lock
+     * pesimista del ancla → exactamente una completacion cruza el umbral N y
+     * avanza. Consume el token hijo, cuenta hermanos consumidos y, si llegaron
+     * todos, reactiva el ancla y avanza al outgoing.
+     */
+    private void completeMultiInstanceChild(ProcessInstanceEntity instance, TokenEntity childToken,
+                                            TokenEntity anchorArg, Map<String, Object> childOutput,
+                                            String bearerToken, UUID userId) {
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // 1. Consumir el token hijo (su cuerpo termino).
+        childToken.setLifecycle("consumed");
+        childToken.setUpdatedAt(now);
+        tokenRepo.save(childToken);
+
+        // 2. Lock del ancla — serializa las completaciones concurrentes.
+        TokenEntity anchor = tokenRepo.findByIdForUpdate(anchorArg.getId()).orElse(anchorArg);
+        UUID activityId = anchor.getCurrentElementId();
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
+        ProcessDefinition.FlowElement activity = def.findElementById(activityId);
+
+        // 3. Acumular output en outputCollection (opcional), bajo el lock → sin lost update.
+        if (activity != null && childOutput != null && !childOutput.isEmpty()) {
+            appendMiOutput(instance, activity, childOutput);
+        }
+
+        // 4. Contar hijos consumidos vs N.
+        int completed = tokenRepo.countByParentTokenIdAndCurrentElementIdAndLifecycle(
+            anchor.getId(), activityId, "consumed");
+        int total = anchor.getMiCardinality() == null ? completed : anchor.getMiCardinality();
+
+        if (completed >= total) {
+            anchor.setLifecycle("active");
+            anchor.setMiCardinality(null);   // higiene: el ancla deja de ser MI al avanzar
+            anchor.setUpdatedAt(now);
+            tokenRepo.save(anchor);
+            audit(instance, "mi.join.completed", activityId, anchor.getId(), userId,
+                Map.of("elementCode", activity != null ? activity.code() : "?",
+                       "cardinality", total));
+            metricInc("bpm.mi.completed", def);
+            log.info("multiInstance '{}' join completo ({}/{}) → avanzando",
+                activity != null ? activity.code() : "?", completed, total);
+            if (activity != null) {
+                consumeAndMoveToNext(instance, anchor, activity, def, userId);
+            }
+        } else {
+            audit(instance, "mi.join.progress", activityId, anchor.getId(), userId,
+                Map.of("completed", completed, "total", total));
+        }
+    }
+
+    /** Acumula el output de una ejecucion MI en la var List config.multiInstance.outputCollection (si esta declarada). */
+    private void appendMiOutput(ProcessInstanceEntity instance, ProcessDefinition.FlowElement activity,
+                                Map<String, Object> item) {
+        Map<String, Object> mi = activity.multiInstance();
+        Object outColObj = mi == null ? null : mi.get("outputCollection");
+        if (!(outColObj instanceof String outCol) || outCol.isBlank()) return;
+        Object existing = currentVariablesAsMap(instance).get(outCol);
+        List<Object> list = new ArrayList<>();
+        if (existing instanceof List<?> l) list.addAll(l);
+        list.add(item);
+        setVariable(instance, outCol, list);
+    }
+
+    /** Extrae las returnVariables declaradas del child (para el outputCollection de un sub_process MI). */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractReturnVars(ProcessDefinition.FlowElement subProcessElement,
+                                                  ProcessInstanceEntity child) {
+        Map<String, Object> cfg = subProcessElement.config();
+        Map<String, Object> callCfg = cfg == null ? null : (Map<String, Object>) cfg.get("callActivity");
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (callCfg != null && callCfg.get("returnVariables") instanceof List<?> retList) {
+            Map<String, Object> childVars = currentVariablesAsMap(child);
+            for (Object v : retList) {
+                String name = String.valueOf(v);
+                if (childVars.containsKey(name)) out.put(name, childVars.get(name));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Devuelve el token ancla si `token` es un hijo de multi-instance, o null.
+     * Discriminador vs parallel_gateway: el ancla tiene mi_cardinality != null y
+     * esta parado en el MISMO element que el hijo (la activity multi-instanciada).
+     */
+    private TokenEntity miAnchorOf(TokenEntity token) {
+        if (token == null || token.getParentTokenId() == null) return null;
+        TokenEntity anchor = tokenRepo.findById(token.getParentTokenId()).orElse(null);
+        if (anchor != null && anchor.getMiCardinality() != null
+            && anchor.getCurrentElementId().equals(token.getCurrentElementId())) {
+            return anchor;
+        }
+        return null;
+    }
+
+    /** Resuelve config.multiInstance.collection (JEXL ${..} o nombre de var) a una List. */
+    @SuppressWarnings("unchecked")
+    private List<Object> resolveCollectionValue(ProcessInstanceEntity instance, String expr) {
+        if (expr == null || expr.isBlank()) return List.of();
+        Map<String, Object> vars = currentVariablesAsMap(instance);
+        Object raw;
+        if (expr.startsWith("${") && expr.endsWith("}")) {
+            String script = expr.substring(2, expr.length() - 1);
+            try {
+                JexlContext ctx = new MapContext();
+                for (Map.Entry<String, Object> e : vars.entrySet()) ctx.set(e.getKey(), e.getValue());
+                raw = jexl.createScript(script).execute(ctx);
+            } catch (Exception e) {
+                log.warn("multiInstance collection expr '{}' fallo: {}", expr, e.getMessage());
+                return List.of();
+            }
+        } else {
+            raw = vars.get(expr);
+        }
+        if (raw instanceof List<?> l) return new ArrayList<>((List<Object>) l);
+        if (raw instanceof Collection<?> c) return new ArrayList<>((Collection<Object>) c);
+        if (raw == null) return List.of();
+        log.warn("multiInstance collection '{}' no resolvio a una List (fue {})",
+            expr, raw.getClass().getSimpleName());
+        return List.of();
     }
 
     // ─── business_rule_task (B3 — DMN) ───────────────────────────────────────

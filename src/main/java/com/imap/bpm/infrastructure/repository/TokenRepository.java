@@ -17,9 +17,14 @@
 package com.imap.bpm.infrastructure.repository;
 
 import com.imap.bpm.infrastructure.entity.TokenEntity;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 public interface TokenRepository extends JpaRepository<TokenEntity, UUID> {
@@ -32,6 +37,23 @@ public interface TokenRepository extends JpaRepository<TokenEntity, UUID> {
      */
     List<TokenEntity> findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
         UUID processinstanceId, UUID currentElementId, String lifecycle);
+
+    /**
+     * Multi-instance JOIN por cardinalidad: cuenta los tokens hijos (mismo
+     * parentTokenId = token ancla) que ya terminaron el cuerpo de la activity
+     * (currentElementId = la activity multi-instanciada) con un lifecycle dado.
+     */
+    int countByParentTokenIdAndCurrentElementIdAndLifecycle(
+        UUID parentTokenId, UUID currentElementId, String lifecycle);
+
+    /**
+     * Multi-instance anti-race: lock pesimista del token ancla. Serializa las
+     * completaciones concurrentes de los hijos para que exactamente una cruce
+     * el umbral N y avance (mismo espíritu que el claim atómico de jobs).
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT t FROM TokenEntity t WHERE t.id = :id")
+    Optional<TokenEntity> findByIdForUpdate(@Param("id") UUID id);
 
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);

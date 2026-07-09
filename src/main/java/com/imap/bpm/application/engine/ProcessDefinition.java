@@ -119,7 +119,21 @@ public record ProcessDefinition(
     public record FlowElement(
         UUID id, String code, String type, String name,
         Map<String, Object> config, int sortOrder
-    ) {}
+    ) {
+        /**
+         * Multi-instance marker: la activity se ejecuta N veces (una por item
+         * de una coleccion de runtime). Convencion: config.multiInstance =
+         * { collection, elementVar, mode, outputCollection? }.
+         */
+        public boolean hasMultiInstance() {
+            return config != null && config.get("multiInstance") instanceof Map;
+        }
+
+        @SuppressWarnings("unchecked")
+        public Map<String, Object> multiInstance() {
+            return config == null ? null : (Map<String, Object>) config.get("multiInstance");
+        }
+    }
 
     public record SequenceFlow(
         UUID id, UUID sourceId, UUID targetId,
