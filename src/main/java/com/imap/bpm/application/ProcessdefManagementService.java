@@ -638,6 +638,9 @@ public class ProcessdefManagementService {
         // Topología: reachability — todos alcanzables desde algún start
         validateReachability(req.flowElements(), req.sequenceFlows());
 
+        // event_based_gateway: ≥2 outgoing y todos apuntan a intermediate_event
+        validateEventGateways(req.flowElements(), req.sequenceFlows());
+
         // Task forms: flowElementCode existe + es user_task + entityDefCode existe (s2s)
         if (req.taskForms() != null) {
             Map<String, String> codeToType = new HashMap<>();
@@ -701,6 +704,43 @@ public class ProcessdefManagementService {
             if (!reachable.contains(fe.code())) {
                 throw new IllegalArgumentException(
                     "flowElement '" + fe.code() + "' is not reachable from any start_event");
+            }
+        }
+    }
+
+    /**
+     * event_based_gateway (carrera de eventos): debe tener ≥2 outgoing y cada
+     * target debe ser un intermediate_event (timer/message/signal) — el motor
+     * arma cada rama y la primera que dispara gana.
+     */
+    private void validateEventGateways(List<CreateProcessdefRequest.FlowElement> elements,
+                                       List<CreateProcessdefRequest.SequenceFlow> flows) {
+        Set<String> eventGateways = new HashSet<>();
+        Map<String, String> codeToType = new HashMap<>();
+        for (CreateProcessdefRequest.FlowElement fe : elements) {
+            codeToType.put(fe.code(), fe.type());
+            if ("event_based_gateway".equals(fe.type())) eventGateways.add(fe.code());
+        }
+        if (eventGateways.isEmpty()) return;
+
+        Map<String, List<String>> outgoing = new HashMap<>();
+        if (flows != null) {
+            for (CreateProcessdefRequest.SequenceFlow sf : flows) {
+                outgoing.computeIfAbsent(sf.sourceCode(), k -> new ArrayList<>()).add(sf.targetCode());
+            }
+        }
+        for (String gw : eventGateways) {
+            List<String> targets = outgoing.getOrDefault(gw, List.of());
+            if (targets.size() < 2) {
+                throw new IllegalArgumentException(
+                    "event_based_gateway '" + gw + "' requires >= 2 outgoing flows (event race)");
+            }
+            for (String t : targets) {
+                if (!"intermediate_event".equals(codeToType.get(t))) {
+                    throw new IllegalArgumentException(
+                        "event_based_gateway '" + gw + "' outgoing must target intermediate_event — '"
+                        + t + "' is " + codeToType.get(t));
+                }
             }
         }
     }

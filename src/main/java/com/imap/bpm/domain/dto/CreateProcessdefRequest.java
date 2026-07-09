@@ -102,6 +102,7 @@ public record CreateProcessdefRequest(
         "business_rule_task",
         "exclusive_gateway",
         "parallel_gateway",
+        "event_based_gateway",
         "sub_process",
         "intermediate_event",
         "boundary_event"
