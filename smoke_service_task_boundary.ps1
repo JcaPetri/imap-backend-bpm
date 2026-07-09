@@ -156,8 +156,8 @@ Step 5 'Cleanup'
 foreach ($iid in $startedInstances) {
     try { Invoke-RestMethod -Uri "$bpm/v1/bpm/instance/$iid`?force=true" -Method DELETE -Headers $H | Out-Null } catch {}
 }
-foreach ($pid in $createdPdIds) {
-    try { Invoke-RestMethod -Uri "$bpm/v1/bpm/admin/processdef/$pid" -Method DELETE -Headers $H | Out-Null } catch {}
+foreach ($pdid in $createdPdIds) {
+    try { Invoke-RestMethod -Uri "$bpm/v1/bpm/admin/processdef/$pdid" -Method DELETE -Headers $H | Out-Null } catch {}
 }
 OKMsg 'cleanup done'
 
