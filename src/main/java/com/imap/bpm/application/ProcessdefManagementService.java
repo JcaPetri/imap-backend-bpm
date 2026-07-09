@@ -664,6 +664,7 @@ public class ProcessdefManagementService {
         }
     }
 
+    @SuppressWarnings("unchecked")
     private void validateReachability(List<CreateProcessdefRequest.FlowElement> elements,
                                       List<CreateProcessdefRequest.SequenceFlow> flows) {
         Set<String> starts = new HashSet<>();
@@ -674,6 +675,18 @@ public class ProcessdefManagementService {
         if (flows != null) {
             for (CreateProcessdefRequest.SequenceFlow sf : flows) {
                 outgoing.computeIfAbsent(sf.sourceCode(), k -> new ArrayList<>()).add(sf.targetCode());
+            }
+        }
+        // Un boundary_event NO tiene flow entrante: se adjunta a una activity via
+        // config.boundary.attachedTo. Es alcanzable si su activity lo es → arista
+        // virtual activity -> boundary para que el BFS lo cubra (y propague su outgoing).
+        for (CreateProcessdefRequest.FlowElement fe : elements) {
+            if (!"boundary_event".equals(fe.type()) || fe.config() == null) continue;
+            Object bObj = fe.config().get("boundary");
+            if (!(bObj instanceof Map)) continue;
+            Object attachedTo = ((Map<String, Object>) bObj).get("attachedTo");
+            if (attachedTo instanceof String at && !at.isBlank()) {
+                outgoing.computeIfAbsent(at, k -> new ArrayList<>()).add(fe.code());
             }
         }
         Set<String> reachable = new HashSet<>(starts);
