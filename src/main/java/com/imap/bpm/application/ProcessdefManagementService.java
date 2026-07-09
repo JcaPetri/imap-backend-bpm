@@ -533,8 +533,9 @@ public class ProcessdefManagementService {
         Processdef pd = processdefRepository.findById(processdefId).orElse(null);
         UUID currentVerId = pd == null ? null : pd.getCurrentversionId();
 
-        List<Processversion> versions = processversionRepository
-            .findByProcessdefIdOrderByVersionDesc(processdefId);
+        // Copia mutable: el puerto devuelve lista inmutable (adapter usa toList()).
+        List<Processversion> versions = new ArrayList<>(processversionRepository
+            .findByProcessdefIdOrderByVersionDesc(processdefId));
         // asc por version (el finder devuelve desc)
         versions.sort(Comparator.comparing(
             v -> v.getVersion() == null ? 0 : v.getVersion()));
