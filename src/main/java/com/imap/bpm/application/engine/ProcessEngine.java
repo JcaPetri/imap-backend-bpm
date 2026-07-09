@@ -746,7 +746,7 @@ public class ProcessEngine {
             "elementCode", userTask.code(),
             "assignedUserId", task.getAssignedUserId() != null
                 ? task.getAssignedUserId().toString() : "(none)",
-            "formEntityDefCode", form != null ? form.entityDefCode() : "(none)",
+            "formEntityDefCode", (form != null && form.entityDefCode() != null) ? form.entityDefCode() : "(none)",
             "boundariesScheduled", boundariesScheduled
         ));
         log.info("UserTask '{}' created → task {} waiting (form={}, assignedTo={}, boundaries={})",
