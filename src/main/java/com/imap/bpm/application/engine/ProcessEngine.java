@@ -619,24 +619,26 @@ public class ProcessEngine {
             return;
         }
 
-        // ── FAILURE con boundaryErrorCode → disparar boundary error ───────────
-        if (result.boundaryErrorCode() != null) {
-            log.info("service_task '{}' raised boundaryErrorCode='{}' — looking for boundary error event",
-                current.code(), result.boundaryErrorCode());
-            audit(instance, "service_task.boundary_error", current.id(), token.getId(), userId,
-                Map.of("elementCode", current.code(),
-                       "boundaryErrorCode", result.boundaryErrorCode(),
-                       "errorMessage", result.errorMessage() == null ? "" : result.errorMessage()));
-            // Buscar boundary event adjunto al service_task con matching errorCode
-            // y disparar (mismo patrón que B2 — boundary timer fire).
-            // MVP simple: si no hay boundary, marcar como failure normal.
-            boolean fired = tryFireServiceTaskBoundaryError(instance, token, current, def,
-                result.boundaryErrorCode(), userId);
-            if (fired) return;
-            // Fall through: no boundary → tratar como FAILURE normal
-        }
+        // ── FAILURE → intentar boundary error auto antes de marcar 'failed' ───
+        // errorCode efectivo: el boundaryErrorCode explícito del handler tiene
+        // prioridad; si no, el errorCode del resultado (timeout / 5xx / excepción).
+        // Ambos matchean contra findErrorBoundariesFor (exact O catch-all `*`/null),
+        // así que un boundary catch-all sobre el service_task captura CUALQUIER falla.
+        String effectiveErrorCode = result.boundaryErrorCode() != null
+            ? result.boundaryErrorCode() : result.errorCode();
 
-        // ── FAILURE definitivo (sin boundary o sin boundary matching) ─────────
+        audit(instance, "service_task.error", current.id(), token.getId(), userId,
+            Map.of("elementCode", current.code(),
+                   "serviceCode", serviceCode == null ? "(none)" : serviceCode,
+                   "errorCode", effectiveErrorCode == null ? "UNKNOWN" : effectiveErrorCode,
+                   "errorMessage", result.errorMessage() == null ? "" : result.errorMessage(),
+                   "explicitBoundaryCode", result.boundaryErrorCode() != null));
+
+        boolean fired = tryFireServiceTaskBoundaryError(instance, token, current, def,
+            effectiveErrorCode, userId);
+        if (fired) return;
+
+        // ── FAILURE definitivo (sin boundary matching) ───────────────────────
         token.setLifecycle("failed");
         token.setUpdatedAt(OffsetDateTime.now());
         tokenRepo.save(token);
@@ -650,23 +652,53 @@ public class ProcessEngine {
     }
 
     /**
-     * Stub MVP: en V1 NO buscamos boundary error events para service_tasks
-     * (los boundaries solo están implementados sobre user_task — ver
-     * scheduleBoundaryTimers). Para soportarlo en service_task necesitamos
-     * una iter dedicada. Por ahora retorna false → fall through a failure.
+     * Boundary error auto sobre service_task: al fallar (tras agotar retries),
+     * busca boundary_event de error/escalation adjuntos al service_task que
+     * matcheen el errorCode (exact, o catch-all `*`/null) y los dispara. Mismo
+     * mecanismo que raiseTaskError (endpoint manual sobre user_task) pero SIN
+     * task humana — el activityToken es el propio token del service_task.
      *
-     * V2 TODO: implementar igual que B2 (handleUserTask) — leer
-     * def.findBoundariesFor(current.code()), filtrar por subtype='error' +
-     * config.errorCode matching, disparar el primero.
+     * Habilita resiliencia de orquestacion: modelar un boundary error catch-all
+     * sobre un service_task enruta CUALQUIER falla del handler HTTP a una rama
+     * de excepcion (retry alternativo / notificacion / escalacion) en vez de
+     * dejar el token 'failed' sin recuperacion.
+     *
+     * @return true si se disparo al menos un boundary (caller retorna sin marcar failed).
      */
     private boolean tryFireServiceTaskBoundaryError(ProcessInstanceEntity instance, TokenEntity token,
                                                      ProcessDefinition.FlowElement serviceTask,
                                                      ProcessDefinition def,
                                                      String errorCode, UUID userId) {
-        log.warn("Service task boundary error handling is V2 (not implemented yet) — " +
-                 "errorCode='{}' on service_task '{}' will fall through to FAILURE",
-                 errorCode, serviceTask.code());
-        return false;
+        List<ProcessDefinition.FlowElement> matches = def.findErrorBoundariesFor(serviceTask.code(), errorCode);
+        if (matches.isEmpty()) {
+            log.info("service_task '{}' error '{}' — sin boundary error matching, fall through a FAILURE",
+                serviceTask.code(), errorCode);
+            return false;
+        }
+        int fired = 0;
+        for (ProcessDefinition.FlowElement boundary : matches) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> boundaryCfg = boundary.config() == null ? Map.of()
+                : (Map<String, Object>) boundary.config().getOrDefault("boundary", Map.of());
+            boolean interrupting = !(Boolean.FALSE.equals(boundaryCfg.get("interrupting")));
+
+            Map<String, Object> extra = new LinkedHashMap<>();
+            extra.put("trigger", "error");
+            extra.put("errorCode", errorCode == null ? "(none)" : errorCode);
+            extra.put("source", "service_task");
+
+            fireBoundaryHandler(instance, token,
+                boundary.id(), boundary.code(),
+                serviceTask.code(), null /* service_task no tiene task humana */,
+                interrupting, null,
+                "boundary.error.fired", "service_task_error:" + errorCode,
+                extra);
+            fired++;
+        }
+        metricInc("bpm.service_task.boundary_fired", def);
+        log.info("service_task '{}' error '{}' → disparo {} boundary(ies)",
+            serviceTask.code(), errorCode, fired);
+        return fired > 0;
     }
 
     // ─── end_event ──────────────────────────────────────────────────────────
