@@ -27,6 +27,9 @@ public interface ProcessInstanceRepository extends JpaRepository<ProcessInstance
     List<ProcessInstanceEntity> findByProcessdefIdAndLifecycle(UUID processdefId, String lifecycle);
     List<ProcessInstanceEntity> findByParentInstanceId(UUID parentInstanceId);
 
+    /** Hijos de sub_process spawneados por un token dado (uso: cancelar hijos de MI en completionCondition). */
+    List<ProcessInstanceEntity> findByParentTokenId(UUID parentTokenId);
+
     /** Para listado admin (cleanup script). */
     List<ProcessInstanceEntity> findByProcessdefIdOrderByStartedAtDesc(UUID processdefId);
 

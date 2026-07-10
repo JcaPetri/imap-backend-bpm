@@ -846,10 +846,19 @@ public class ProcessdefManagementService {
                 "multiInstance.elementVar is required @flowElement '" + fe.code() + "'");
         }
         Object mode = mi.get("mode");
-        if (mode != null && !"parallel".equals(mode)) {
+        if (mode != null && !"parallel".equals(mode) && !"sequential".equals(mode)) {
             throw new IllegalArgumentException(
-                "multiInstance.mode '" + mode + "' not supported (MVP=parallel) @flowElement '"
+                "multiInstance.mode '" + mode + "' not supported (parallel | sequential) @flowElement '"
                 + fe.code() + "'");
+        }
+        Object cc = mi.get("completionCondition");
+        if (cc != null) {
+            if (!(cc instanceof String ccs) || ccs.isBlank()) {
+                throw new IllegalArgumentException(
+                    "multiInstance.completionCondition must be a non-blank expression @flowElement '"
+                    + fe.code() + "'");
+            }
+            validateConditionExprBasic("multiInstance.completionCondition @" + fe.code(), (String) cc);
         }
     }
 
