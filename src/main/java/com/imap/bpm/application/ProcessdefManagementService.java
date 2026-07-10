@@ -675,7 +675,9 @@ public class ProcessdefManagementService {
                                       List<CreateProcessdefRequest.SequenceFlow> flows) {
         Set<String> starts = new HashSet<>();
         for (CreateProcessdefRequest.FlowElement fe : elements) {
-            if ("start_event".equals(fe.type())) starts.add(fe.code());
+            // event_sub_process (Ola 6.1) es un handler DORMANTE sin flow entrante —
+            // alcanzable por definición (disparado por evento, no por el flujo). Root virtual.
+            if ("start_event".equals(fe.type()) || "event_sub_process".equals(fe.type())) starts.add(fe.code());
         }
         Map<String, List<String>> outgoing = new HashMap<>();
         if (flows != null) {

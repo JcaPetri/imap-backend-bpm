@@ -99,6 +99,7 @@ public class BpmProcessController {
     private final BpmInboxEventRepository inboxRepo;
     private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
     private final com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo;
+    private final com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo;
     private final ScoreService scoreService;
     private final SseEventBus sseEventBus;
     private final com.imap.bpm.application.ProcessdefManagementService processdefMgmt;
@@ -119,6 +120,7 @@ public class BpmProcessController {
                                 BpmInboxEventRepository inboxRepo,
                                 com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo,
                                 com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo,
+                                com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo,
                                 ScoreService scoreService,
                                 SseEventBus sseEventBus,
                                 com.imap.bpm.application.ProcessdefManagementService processdefMgmt) {
@@ -135,6 +137,7 @@ public class BpmProcessController {
         this.inboxRepo = inboxRepo;
         this.compensationRepo = compensationRepo;
         this.incidentRepo = incidentRepo;
+        this.eventSubRepo = eventSubRepo;
         this.scoreService = scoreService;
         this.sseEventBus = sseEventBus;
         this.processdefMgmt = processdefMgmt;
@@ -946,6 +949,7 @@ public class BpmProcessController {
         long corrs  = msgCorrRepo.deleteByProcessinstanceId(instanceId);
         long comps  = compensationRepo.deleteByProcessinstanceId(instanceId);
         long incs   = incidentRepo.deleteByProcessinstanceId(instanceId);
+        long evtsubs = eventSubRepo.deleteByProcessinstanceId(instanceId);
         instanceRepo.delete(instance);
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -960,7 +964,8 @@ public class BpmProcessController {
             "jobs", jobs,
             "messageCorrelations", corrs,
             "compensations", comps,
-            "incidents", incs
+            "incidents", incs,
+            "eventSubscriptions", evtsubs
         ));
         return ResponseEntity.ok(out);
     }
