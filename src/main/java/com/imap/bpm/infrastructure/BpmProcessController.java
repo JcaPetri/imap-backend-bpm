@@ -98,6 +98,7 @@ public class BpmProcessController {
     private final MessageCorrelationRepository msgCorrRepo;
     private final BpmInboxEventRepository inboxRepo;
     private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
+    private final com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo;
     private final ScoreService scoreService;
     private final SseEventBus sseEventBus;
     private final com.imap.bpm.application.ProcessdefManagementService processdefMgmt;
@@ -117,6 +118,7 @@ public class BpmProcessController {
                                 MessageCorrelationRepository msgCorrRepo,
                                 BpmInboxEventRepository inboxRepo,
                                 com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo,
+                                com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo,
                                 ScoreService scoreService,
                                 SseEventBus sseEventBus,
                                 com.imap.bpm.application.ProcessdefManagementService processdefMgmt) {
@@ -132,6 +134,7 @@ public class BpmProcessController {
         this.msgCorrRepo = msgCorrRepo;
         this.inboxRepo = inboxRepo;
         this.compensationRepo = compensationRepo;
+        this.incidentRepo = incidentRepo;
         this.scoreService = scoreService;
         this.sseEventBus = sseEventBus;
         this.processdefMgmt = processdefMgmt;
@@ -152,6 +155,62 @@ public class BpmProcessController {
             bearerToken, tenantId, userId);
 
         return toInstanceResponse(instance);
+    }
+
+    // ─── 4.2 Incidentes (ops: list / retry / resolve) ────────────────────────
+
+    /** Lista incidentes del tenant. ?lifecycle=open (default: todos). */
+    @GetMapping("/incidents")
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> listIncidents(
+            @RequestParam(value = "lifecycle", required = false) String lifecycle) {
+        tenantSession.applyToCurrentTransaction();
+        UUID tenantId = TenantContextHolder.get();
+        List<com.imap.bpm.infrastructure.entity.IncidentEntity> incs =
+            (lifecycle == null || lifecycle.isBlank())
+                ? incidentRepo.findByTenantIdOrderByCreatedAtDesc(tenantId)
+                : incidentRepo.findByTenantIdAndLifecycleOrderByCreatedAtDesc(tenantId, lifecycle);
+        List<Map<String, Object>> out = new ArrayList<>(incs.size());
+        for (var i : incs) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", i.getId().toString());
+            row.put("processinstanceId", i.getProcessinstanceId().toString());
+            row.put("elementCode", i.getElementCode());
+            row.put("incidentType", i.getIncidentType());
+            row.put("errorCode", i.getErrorCode());
+            row.put("errorMessage", i.getErrorMessage());
+            row.put("lifecycle", i.getLifecycle());
+            row.put("createdAt", i.getCreatedAt());
+            row.put("resolvedAt", i.getResolvedAt());
+            out.add(row);
+        }
+        return out;
+    }
+
+    /** Retry-from-failure: re-corre el paso que fallo. 404 si no existe, 409 si no está open. */
+    @PostMapping("/incident/{incidentId}/retry")
+    public ResponseEntity<Map<String, Object>> retryIncident(@PathVariable("incidentId") String incidentId,
+                                                             HttpServletRequest req) {
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        String bearerToken = extractBearer(req);
+        try {
+            return ResponseEntity.ok(engine.retryIncident(UUID.fromString(incidentId), bearerToken, userId));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    /** Cierre manual de un incidente (sin re-correr). 404 si no existe, 409 si ya resuelto. */
+    @PostMapping("/incident/{incidentId}/resolve")
+    public ResponseEntity<Map<String, Object>> resolveIncident(@PathVariable("incidentId") String incidentId) {
+        UserContext user = UserContextHolder.get();
+        UUID userId = user != null ? user.userId() : null;
+        try {
+            return ResponseEntity.ok(engine.resolveIncident(UUID.fromString(incidentId), userId));
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.notFound().build();
+        }
     }
 
     /**
@@ -886,6 +945,7 @@ public class BpmProcessController {
         long jobs   = jobRepo.deleteByProcessinstanceId(instanceId);
         long corrs  = msgCorrRepo.deleteByProcessinstanceId(instanceId);
         long comps  = compensationRepo.deleteByProcessinstanceId(instanceId);
+        long incs   = incidentRepo.deleteByProcessinstanceId(instanceId);
         instanceRepo.delete(instance);
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -899,7 +959,8 @@ public class BpmProcessController {
             "auditLogs", audits,
             "jobs", jobs,
             "messageCorrelations", corrs,
-            "compensations", comps
+            "compensations", comps,
+            "incidents", incs
         ));
         return ResponseEntity.ok(out);
     }

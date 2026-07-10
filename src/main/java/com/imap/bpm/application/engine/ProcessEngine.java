@@ -104,6 +104,7 @@ public class ProcessEngine {
     private final com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo;
     private final com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService;
     private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
+    private final com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo;
 
     /**
      * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
@@ -139,7 +140,8 @@ public class ProcessEngine {
                          com.imap.bpm.application.engine.servicetask.ServiceTaskRunner serviceTaskRunner,
                          com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo,
                          com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService,
-                         com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo) {
+                         com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo,
+                         com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -158,6 +160,7 @@ public class ProcessEngine {
         this.msgStartSubRepo = msgStartSubRepo;
         this.taskAssignmentService = taskAssignmentService;
         this.compensationRepo = compensationRepo;
+        this.incidentRepo = incidentRepo;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -747,6 +750,113 @@ public class ProcessEngine {
                    "errorMessage", result.errorMessage() == null ? "" : result.errorMessage()));
         log.error("service_task '{}' (serviceCode={}) failed after retries — token {} marked as failed",
             current.code(), serviceCode, token.getId());
+        // 4.2 — registrar el incidente (ops lo inspecciona + retry-desde-el-paso).
+        openIncident(instance, token, current, "service_task_failure",
+            result.errorCode(), result.errorMessage(), userId);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 4.2 Incident management + retry-from-failure
+    //
+    // Un service_task/job que falla terminal genera un INCIDENTE (bpm_pro_incident_tbl)
+    // en vez de dejar el token 'failed' sin recuperacion. Ops: GET /incidents +
+    // POST retry (re-corre el paso desde donde fallo) + POST resolve (cierre manual).
+    // ════════════════════════════════════════════════════════════════════════
+
+    /** Crea un incidente 'open' por una falla terminal (el token ya quedo 'failed'). */
+    private void openIncident(ProcessInstanceEntity instance, TokenEntity token,
+                              ProcessDefinition.FlowElement element, String incidentType,
+                              String errorCode, String errorMessage, UUID userId) {
+        OffsetDateTime now = OffsetDateTime.now();
+        IncidentEntity inc = new IncidentEntity();
+        inc.setId(UUID.randomUUID());
+        inc.setTenantId(instance.getTenantId());
+        inc.setProcessinstanceId(instance.getId());
+        inc.setTokenId(token != null ? token.getId() : null);
+        inc.setElementId(element != null ? element.id() : null);
+        inc.setElementCode(element != null ? element.code() : null);
+        inc.setIncidentType(incidentType);
+        inc.setErrorCode(errorCode);
+        inc.setErrorMessage(errorMessage);
+        inc.setLifecycle("open");
+        inc.setStateId(DEFAULT_STATE_ACTIVE);
+        inc.setCreatedAt(now);
+        inc.setUpdatedAt(now);
+        incidentRepo.save(inc);
+        audit(instance, "incident.opened", element != null ? element.id() : null,
+            token != null ? token.getId() : null, userId, Map.of(
+                "incidentId", inc.getId().toString(),
+                "elementCode", element != null ? element.code() : "?",
+                "errorCode", errorCode == null ? "UNKNOWN" : errorCode));
+        metricInc("bpm.incident.opened", instance.getProcessdefId().toString());
+        log.warn("incident {} opened for instance {} element {} ({})",
+            inc.getId(), instance.getId(), element != null ? element.code() : "?", errorCode);
+    }
+
+    /** Retry-from-failure: resuelve el incidente + reactiva el token + re-despacha el paso. */
+    @Transactional
+    public Map<String, Object> retryIncident(UUID incidentId, String bearerToken, UUID userId) {
+        tenantSession.applyToCurrentTransaction();
+        IncidentEntity inc = incidentRepo.findById(incidentId)
+            .orElseThrow(() -> new IllegalArgumentException("Incident not found: " + incidentId));
+        if (!"open".equals(inc.getLifecycle())) {
+            throw new IllegalStateException("Incident " + incidentId + " is not open (lifecycle="
+                + inc.getLifecycle() + ")");
+        }
+        OffsetDateTime now = OffsetDateTime.now();
+        inc.setLifecycle("resolved");   // este incidente se reintenta; si falla otra vez, abre uno nuevo
+        inc.setResolvedAt(now);
+        inc.setUpdatedAt(now);
+        inc.setUpdatedById(userId);
+        incidentRepo.save(inc);
+
+        ProcessInstanceEntity instance = instanceRepo.findById(inc.getProcessinstanceId())
+            .orElseThrow(() -> new IllegalStateException("Instance gone for incident " + incidentId));
+        TokenEntity token = inc.getTokenId() == null ? null
+            : tokenRepo.findById(inc.getTokenId()).orElse(null);
+        audit(instance, "incident.retried", inc.getElementId(), inc.getTokenId(), userId,
+            Map.of("incidentId", incidentId.toString()));
+        metricInc("bpm.incident.retried", instance.getProcessdefId().toString());
+
+        boolean reDispatched = false;
+        if (token != null && "failed".equals(token.getLifecycle())) {
+            token.setLifecycle("active");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            ProcessDefinition def = loader.load(instance.getProcessversionId(), bearerToken, instance.getTenantId());
+            advanceToken(instance, token, def, userId);   // re-corre el service_task (async o inline)
+            reDispatched = true;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("incidentId", incidentId.toString());
+        out.put("reDispatched", reDispatched);
+        return out;
+    }
+
+    /** Cierre manual de un incidente (sin re-correr el paso). */
+    @Transactional
+    public Map<String, Object> resolveIncident(UUID incidentId, UUID userId) {
+        tenantSession.applyToCurrentTransaction();
+        IncidentEntity inc = incidentRepo.findById(incidentId)
+            .orElseThrow(() -> new IllegalArgumentException("Incident not found: " + incidentId));
+        if ("resolved".equals(inc.getLifecycle())) {
+            throw new IllegalStateException("Incident " + incidentId + " already resolved");
+        }
+        OffsetDateTime now = OffsetDateTime.now();
+        inc.setLifecycle("resolved");
+        inc.setResolvedAt(now);
+        inc.setUpdatedAt(now);
+        inc.setUpdatedById(userId);
+        incidentRepo.save(inc);
+        ProcessInstanceEntity instance = instanceRepo.findById(inc.getProcessinstanceId()).orElse(null);
+        if (instance != null) {
+            audit(instance, "incident.resolved", inc.getElementId(), inc.getTokenId(), userId,
+                Map.of("incidentId", incidentId.toString()));
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("incidentId", incidentId.toString());
+        out.put("resolved", true);
+        return out;
     }
 
     /**
