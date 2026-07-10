@@ -103,6 +103,7 @@ public record CreateProcessdefRequest(
         "exclusive_gateway",
         "parallel_gateway",
         "event_based_gateway",
+        "inclusive_gateway",
         "sub_process",
         "intermediate_event",
         "boundary_event"

@@ -453,6 +453,10 @@ public class ProcessEngine {
                 handleEventBasedGateway(instance, token, current, def, userId);
                 break;
 
+            case "inclusive_gateway":
+                handleInclusiveGateway(instance, token, current, def, userId);
+                break;
+
             case "intermediate_event":
                 handleIntermediateEvent(instance, token, current, def, userId);
                 break;
@@ -1393,6 +1397,155 @@ public class ProcessEngine {
             "incoming", incoming.size(),
             "outgoing", outgoing.size()
         ));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // inclusive_gateway (OR) — activa TODAS las ramas cuya condicion es true
+    //
+    // El gateway mas dificil del spec: en el SPLIT se activan N ramas (1..todas)
+    // segun condiciones; el JOIN debe esperar EXACTAMENTE a las que se activaron
+    // (no a incoming.size() como el parallel). Solucion: el token del SPLIT queda
+    // como ANCLA (waiting) con mi_cardinality = ramas activadas; el JOIN espera esa
+    // cardinalidad dinamica. Reusa el fan-out por parent_token_id del parallel.
+    //
+    // Limitacion MVP conocida: asume split-join estructurado (el 99% de los casos).
+    // No hace el analisis de alcanzabilidad de tokens del spec completo.
+    // Caso de uso: aprobacion que va a Finanzas si monto>X Y a Legal si contrato nuevo.
+    // ════════════════════════════════════════════════════════════════════════
+
+    private void handleInclusiveGateway(ProcessInstanceEntity instance, TokenEntity token,
+                                        ProcessDefinition.FlowElement gateway,
+                                        ProcessDefinition def, UUID userId) {
+        List<ProcessDefinition.SequenceFlow> outgoing = def.outgoingFlows(gateway.id());
+        List<ProcessDefinition.SequenceFlow> incoming = def.incomingFlows(gateway.id());
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // ── SPLIT (1-in / N-out) ──────────────────────────────────────────────
+        if (outgoing.size() > 1 && incoming.size() <= 1) {
+            Map<String, Object> vars = currentVariablesAsMap(instance);
+            List<ProcessDefinition.SequenceFlow> activated = new ArrayList<>();
+            ProcessDefinition.SequenceFlow defaultFlow = null;
+            for (ProcessDefinition.SequenceFlow sf : outgoing) {
+                String cond = sf.conditionExpr();
+                if (cond == null || cond.isBlank()) {
+                    if (defaultFlow == null) defaultFlow = sf;   // primer flow sin condicion = default
+                } else if (evaluateCondition(cond, vars)) {
+                    activated.add(sf);
+                }
+            }
+            // Ninguna condicion matcheo → tomar el default (si hay)
+            if (activated.isEmpty() && defaultFlow != null) activated.add(defaultFlow);
+
+            if (activated.isEmpty()) {
+                log.warn("inclusive_gateway '{}' SPLIT: ninguna condicion matcheo y sin default — token blocked",
+                    gateway.code());
+                token.setLifecycle("waiting");
+                tokenRepo.save(token);
+                audit(instance, "inclusive.no_match", gateway.id(), token.getId(), userId,
+                    Map.of("gatewayCode", gateway.code()));
+                return;
+            }
+
+            // El token del split queda como ANCLA (waiting) con la cardinalidad
+            // esperada = ramas activadas. El JOIN la usa para saber a cuantos esperar.
+            token.setLifecycle("waiting");
+            token.setMiCardinality(activated.size());
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            audit(instance, "inclusive.split", gateway.id(), token.getId(), userId, Map.of(
+                "gatewayCode", gateway.code(),
+                "activated", activated.size(),
+                "outgoingTotal", outgoing.size()
+            ));
+            metricInc("bpm.inclusive.split", def);
+
+            for (ProcessDefinition.SequenceFlow sf : activated) {
+                TokenEntity child = newToken(instance, sf.targetId(), token.getId());
+                tokenRepo.save(child);
+                ProcessDefinition.FlowElement target = def.findElementById(sf.targetId());
+                audit(instance, "token.entered", sf.targetId(), child.getId(), userId, Map.of(
+                    "elementCode", target != null ? target.code() : "?",
+                    "elementType", target != null ? target.type() : "?",
+                    "fromInclusiveSplit", gateway.code()
+                ));
+                advanceToken(instance, child, def, userId);
+            }
+            return;
+        }
+
+        // ── JOIN (M-in / 1-out) ───────────────────────────────────────────────
+        if (incoming.size() > 1 && outgoing.size() == 1) {
+            token.setLifecycle("waiting");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            audit(instance, "inclusive.join.arrived", gateway.id(), token.getId(), userId,
+                Map.of("gatewayCode", gateway.code()));
+
+            UUID myParent = token.getParentTokenId();
+            // El ancla es el token del split (mismo parent_token_id). Lock pesimista
+            // por si dos ramas async (user_task/timer) llegan concurrentes.
+            TokenEntity anchor = myParent == null ? null
+                : tokenRepo.findByIdForUpdate(myParent).orElse(null);
+            int expected = (anchor != null && anchor.getMiCardinality() != null)
+                ? anchor.getMiCardinality() : incoming.size();   // fallback defensivo
+
+            List<TokenEntity> arrived = tokenRepo.findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
+                instance.getId(), gateway.id(), "waiting");
+            List<TokenEntity> siblings = arrived.stream()
+                .filter(t -> Objects.equals(t.getParentTokenId(), myParent))
+                .toList();
+
+            if (siblings.size() < expected) {
+                audit(instance, "inclusive.join.progress", gateway.id(), token.getId(), userId,
+                    Map.of("gatewayCode", gateway.code(), "arrived", siblings.size(), "expected", expected));
+                return;   // esperar mas ramas activadas
+            }
+
+            for (TokenEntity sib : siblings) {
+                sib.setLifecycle("consumed");
+                sib.setUpdatedAt(now);
+                tokenRepo.save(sib);
+            }
+            // Consume el ancla (split token) y restaura el nivel de paralelismo previo.
+            UUID grandparent = anchor != null ? anchor.getParentTokenId() : null;
+            if (anchor != null) {
+                anchor.setLifecycle("consumed");
+                anchor.setMiCardinality(null);
+                anchor.setUpdatedAt(now);
+                tokenRepo.save(anchor);
+            }
+            audit(instance, "inclusive.join.completed", gateway.id(), null, userId, Map.of(
+                "gatewayCode", gateway.code(),
+                "branchesJoined", siblings.size(),
+                "expected", expected
+            ));
+            metricInc("bpm.inclusive.join", def);
+
+            ProcessDefinition.SequenceFlow out = outgoing.get(0);
+            TokenEntity outToken = newToken(instance, out.targetId(), grandparent);
+            tokenRepo.save(outToken);
+            ProcessDefinition.FlowElement target = def.findElementById(out.targetId());
+            audit(instance, "token.entered", out.targetId(), outToken.getId(), userId, Map.of(
+                "elementCode", target != null ? target.code() : "?",
+                "elementType", target != null ? target.type() : "?",
+                "fromInclusiveJoin", gateway.code()
+            ));
+            advanceToken(instance, outToken, def, userId);
+            return;
+        }
+
+        // 1-in/1-out passthrough degenerado
+        if (outgoing.size() == 1 && incoming.size() <= 1) {
+            consumeAndMoveToNext(instance, token, gateway, def, userId);
+            return;
+        }
+
+        log.warn("inclusive_gateway {} shape no soportado in={} out={} — token blocked",
+            gateway.code(), incoming.size(), outgoing.size());
+        token.setLifecycle("waiting");
+        tokenRepo.save(token);
+        audit(instance, "gateway.unsupported_shape", gateway.id(), token.getId(), userId, Map.of(
+            "gatewayCode", gateway.code(), "incoming", incoming.size(), "outgoing", outgoing.size()));
     }
 
     // ════════════════════════════════════════════════════════════════════════
