@@ -106,6 +106,7 @@ public record CreateProcessdefRequest(
         "inclusive_gateway",
         "sub_process",
         "intermediate_event",
-        "boundary_event"
+        "boundary_event",
+        "event_sub_process"
     );
 }

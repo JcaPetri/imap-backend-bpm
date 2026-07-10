@@ -129,6 +129,13 @@ public record ProcessDefinition(
         return out.isEmpty() ? null : findElementById(out.get(0).targetId());
     }
 
+    /** Event sub-processes del def (Ola 6.1): handlers dormantes disparados por evento. */
+    public List<FlowElement> findEventSubprocesses() {
+        return flowElements.stream()
+            .filter(fe -> "event_sub_process".equals(fe.type()))
+            .toList();
+    }
+
     /** Sequence flows salientes de un flowelement, ordenados. */
     public List<SequenceFlow> outgoingFlows(UUID sourceId) {
         return sequenceFlows.stream()

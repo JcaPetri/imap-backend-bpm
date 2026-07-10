@@ -105,6 +105,7 @@ public class ProcessEngine {
     private final com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService;
     private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
     private final com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo;
+    private final com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo;
 
     /**
      * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
@@ -141,7 +142,8 @@ public class ProcessEngine {
                          com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo,
                          com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService,
                          com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo,
-                         com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo) {
+                         com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo,
+                         com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -161,6 +163,7 @@ public class ProcessEngine {
         this.taskAssignmentService = taskAssignmentService;
         this.compensationRepo = compensationRepo;
         this.incidentRepo = incidentRepo;
+        this.eventSubRepo = eventSubRepo;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -327,6 +330,10 @@ public class ProcessEngine {
             "elementCode", start.code(),
             "elementType", start.type()
         ));
+
+        // 4b. Ola 6.1 — registrar suscripciones de event_sub_process (handlers dormantes
+        //     disparados por evento). Se arman ANTES de avanzar el flujo principal.
+        registerEventSubscriptions(instance, def, userId);
 
         // 5. Avanza hasta wait state o end
         advanceToken(instance, token, def, userId);
@@ -1107,8 +1114,46 @@ public class ProcessEngine {
                     notifyParentOfSubprocessCompletion(instance, userId);
                 } else {
                     auditFireAndForgetChildCompletion(instance, userId);
+                    // Ola 6.1 — si este child es el handler de un event_sub_process
+                    // interrupting, el parent quedó sin tokens vivos; al terminar el
+                    // handler, completamos el parent (su scope fue interrumpido).
+                    completeParentIfInterruptedScopeDone(instance, userId);
                 }
             }
+        }
+    }
+
+    /**
+     * Ola 6.1 — completa el parent si su scope fue interrumpido por un event_sub_process
+     * y el handler (este child fire-and-forget) ya terminó: el parent está active, sin
+     * tokens vivos, y sin otros children activos (otro handler non-interrupting en curso).
+     * En el caso non-interrupting normal el parent conserva tokens vivos → no completa acá.
+     */
+    private void completeParentIfInterruptedScopeDone(ProcessInstanceEntity child, UUID userId) {
+        ProcessInstanceEntity parent = instanceRepo.findById(child.getParentInstanceId()).orElse(null);
+        if (parent == null || !"active".equals(parent.getLifecycle())) return;
+        boolean parentHasLiveTokens = !tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+            parent.getId(), List.of("active", "waiting")).isEmpty();
+        if (parentHasLiveTokens) return;
+        long otherActiveChildren = instanceRepo.findByParentInstanceId(parent.getId()).stream()
+            .filter(c -> !c.getId().equals(child.getId()) && "active".equals(c.getLifecycle()))
+            .count();
+        if (otherActiveChildren > 0) return;
+
+        OffsetDateTime now = OffsetDateTime.now();
+        parent.setLifecycle("completed");
+        parent.setEndedAt(now);
+        parent.setUpdatedAt(now);
+        instanceRepo.save(parent);
+        audit(parent, "instance.ended", null, null, userId,
+            Map.of("result", "event_subprocess_scope_completed"));
+        metricInc("bpm.instance.ended", parent.getProcessdefId().toString());
+        log.info("instance {} completada tras handler de event_sub_process (scope interrumpido sin tokens vivos)",
+            parent.getId());
+        // Propagar hacia arriba si el parent es a su vez child.
+        if (parent.getParentInstanceId() != null) {
+            if (parent.getParentTokenId() != null) notifyParentOfSubprocessCompletion(parent, userId);
+            else auditFireAndForgetChildCompletion(parent, userId);
         }
     }
 
@@ -1202,6 +1247,38 @@ public class ProcessEngine {
     private void terminateInstance(ProcessInstanceEntity instance, ProcessDefinition.FlowElement endEvent,
                                    TokenEntity endToken, UUID userId) {
         OffsetDateTime now = OffsetDateTime.now();
+        int killed = cancelLiveTokens(instance);
+
+        instance.setLifecycle("completed");
+        instance.setEndedAt(now);
+        instance.setUpdatedAt(now);
+        instanceRepo.save(instance);
+        audit(instance, "instance.terminated", endEvent.id(), endToken.getId(), userId, Map.of(
+            "endEventCode", endEvent.code(),
+            "killedTokens", killed
+        ));
+        metricInc("bpm.instance.terminated", instance.getProcessdefId().toString());
+        log.info("ProcessInstanceEntity {} TERMINATED via {} (killed {} tokens)",
+            instance.getId(), endEvent.code(), killed);
+
+        // Si es child de un sub_process, notificar/auditar al parent igual que un fin normal.
+        if (instance.getParentInstanceId() != null) {
+            if (instance.getParentTokenId() != null) {
+                notifyParentOfSubprocessCompletion(instance, userId);
+            } else {
+                auditFireAndForgetChildCompletion(instance, userId);
+            }
+        }
+    }
+
+    /**
+     * Cancela TODOS los tokens vivos (active + waiting) de la instancia: des-arma sus
+     * jobs scheduled, correlations waiting y tasks vivas, y consume el token. NO completa
+     * la instancia (a diferencia de terminateInstance). Uso: interrupting event_sub_process
+     * (Ola 6.1) — mata el flujo principal antes de correr el handler. @return tokens cancelados.
+     */
+    private int cancelLiveTokens(ProcessInstanceEntity instance) {
+        OffsetDateTime now = OffsetDateTime.now();
         int killed = 0;
         for (TokenEntity t : tokenRepo.findByProcessinstanceIdAndLifecycleIn(
                 instance.getId(), List.of("active", "waiting"))) {
@@ -1226,27 +1303,141 @@ public class ProcessEngine {
             tokenRepo.save(t);
             killed++;
         }
+        return killed;
+    }
 
-        instance.setLifecycle("completed");
-        instance.setEndedAt(now);
-        instance.setUpdatedAt(now);
-        instanceRepo.save(instance);
-        audit(instance, "instance.terminated", endEvent.id(), endToken.getId(), userId, Map.of(
-            "endEventCode", endEvent.code(),
-            "killedTokens", killed
-        ));
-        metricInc("bpm.instance.terminated", instance.getProcessdefId().toString());
-        log.info("ProcessInstanceEntity {} TERMINATED via {} (killed {} tokens)",
-            instance.getId(), endEvent.code(), killed);
+    // ════════════════════════════════════════════════════════════════════════
+    // Event sub-process (Ola 6.1) — handler dormante disparado por evento (signal).
+    //
+    // Modelado: un flow_element type=event_sub_process (sin flows entrante/saliente,
+    // dormante) con config { eventSubProcess:{ trigger, code, interrupting },
+    // callActivity:{ calledProcessversionId } }. El cuerpo del handler es una
+    // processversion aparte (reusa el spawn de call-activity). Al arrancar la
+    // instancia se registra una suscripcion; cuando llega el signal que matchea:
+    //   • interrupting → cancela los tokens vivos + corre el handler; al completar
+    //     el handler, la instancia (que quedo sin tokens vivos) completa.
+    //   • non-interrupting → corre el handler en paralelo (fire-and-forget); el
+    //     flujo principal sigue; la suscripcion queda active (puede re-dispararse).
+    // ════════════════════════════════════════════════════════════════════════
 
-        // Si es child de un sub_process, notificar/auditar al parent igual que un fin normal.
-        if (instance.getParentInstanceId() != null) {
-            if (instance.getParentTokenId() != null) {
-                notifyParentOfSubprocessCompletion(instance, userId);
-            } else {
-                auditFireAndForgetChildCompletion(instance, userId);
+    /** Registra una suscripcion por cada event_sub_process del def (al arrancar la instancia). */
+    @SuppressWarnings("unchecked")
+    private void registerEventSubscriptions(ProcessInstanceEntity instance, ProcessDefinition def, UUID userId) {
+        List<ProcessDefinition.FlowElement> subs = def.findEventSubprocesses();
+        if (subs.isEmpty()) return;
+        OffsetDateTime now = OffsetDateTime.now();
+        for (ProcessDefinition.FlowElement el : subs) {
+            Map<String, Object> cfg = el.config();
+            Map<String, Object> evtCfg = cfg == null ? null
+                : (Map<String, Object>) cfg.get("eventSubProcess");
+            if (evtCfg == null) {
+                log.warn("event_sub_process '{}' sin config.eventSubProcess — skip", el.code());
+                continue;
             }
+            String triggerType = stringOr(evtCfg.get("trigger"), null);
+            String triggerCode = stringOr(evtCfg.get("code"), null);
+            boolean interrupting = !(Boolean.FALSE.equals(evtCfg.get("interrupting")));
+            String calledVer = extractCalledVersionId(cfg);
+            if (triggerType == null || triggerCode == null || calledVer == null) {
+                log.error("event_sub_process '{}' config incompleta (trigger={}, code={}, calledVersion={}) — skip",
+                    el.code(), triggerType, triggerCode, calledVer);
+                continue;
+            }
+            UUID handlerVersionId;
+            try { handlerVersionId = UUID.fromString(calledVer); }
+            catch (IllegalArgumentException e) {
+                log.error("event_sub_process '{}' calledProcessversionId invalido: {}", el.code(), calledVer);
+                continue;
+            }
+            EventSubscriptionEntity sub = new EventSubscriptionEntity();
+            sub.setId(UUID.randomUUID());
+            sub.setTenantId(instance.getTenantId());
+            sub.setProcessinstanceId(instance.getId());
+            sub.setElementId(el.id());
+            sub.setElementCode(el.code());
+            sub.setTriggerType(triggerType);
+            sub.setTriggerCode(triggerCode);
+            sub.setHandlerVersionId(handlerVersionId);
+            sub.setInterrupting(interrupting);
+            sub.setLifecycle("active");
+            sub.setStateId(DEFAULT_STATE_ACTIVE);
+            sub.setCreatedAt(now);
+            sub.setUpdatedAt(now);
+            eventSubRepo.save(sub);
+            audit(instance, "event_subprocess.subscribed", el.id(), null, userId, Map.of(
+                "elementCode", el.code(), "trigger", triggerType, "code", triggerCode,
+                "interrupting", interrupting));
         }
+    }
+
+    /** calledProcessversionId de un config con callActivity (reusa el shape de sub_process). */
+    @SuppressWarnings("unchecked")
+    private String extractCalledVersionId(Map<String, Object> cfg) {
+        if (cfg == null) return null;
+        Object ca = cfg.get("callActivity");
+        if (ca instanceof Map<?, ?> m && m.get("calledProcessversionId") != null) {
+            return String.valueOf(m.get("calledProcessversionId"));
+        }
+        if (cfg.get("calledProcessversionId") != null) return String.valueOf(cfg.get("calledProcessversionId"));
+        return null;
+    }
+
+    /** Dispara los event_sub_process suscriptos a un signal (llamado desde broadcastSignal). */
+    private int fireEventSubprocessesForSignal(String signalCode, Map<String, Object> payload, UUID tenantId, UUID userId) {
+        List<EventSubscriptionEntity> subs = eventSubRepo
+            .findByTenantIdAndTriggerTypeAndTriggerCodeAndLifecycle(tenantId, "signal", signalCode, "active");
+        int fired = 0;
+        for (EventSubscriptionEntity sub : subs) {
+            if (fireEventSubprocess(sub, payload, userId)) fired++;
+        }
+        return fired;
+    }
+
+    /**
+     * Dispara un event_sub_process: spawnea el handler (calledProcessversionId) como child
+     * fire-and-forget (parentTokenId=null). Si interrupting, cancela antes los tokens vivos
+     * de la instancia y consume la suscripcion; la instancia (sin tokens vivos) completara
+     * cuando el handler termine. @return true si disparo.
+     */
+    private boolean fireEventSubprocess(EventSubscriptionEntity sub, Map<String, Object> payload, UUID userId) {
+        ProcessInstanceEntity instance = instanceRepo.findById(sub.getProcessinstanceId()).orElse(null);
+        if (instance == null || !"active".equals(instance.getLifecycle())) {
+            sub.setLifecycle("consumed");
+            sub.setUpdatedAt(OffsetDateTime.now());
+            eventSubRepo.save(sub);
+            return false;
+        }
+        Map<String, Object> handlerVars = currentVariablesAsMap(instance);
+        if (payload != null) handlerVars.putAll(payload);
+
+        int cancelled = 0;
+        if (sub.isInterrupting()) {
+            cancelled = cancelLiveTokens(instance);
+            sub.setLifecycle("consumed");
+            sub.setUpdatedAt(OffsetDateTime.now());
+            eventSubRepo.save(sub);
+        }
+
+        audit(instance, "event_subprocess.triggered", sub.getElementId(), null, userId, Map.of(
+            "elementCode", sub.getElementCode() == null ? "(none)" : sub.getElementCode(),
+            "trigger", sub.getTriggerType(), "code", sub.getTriggerCode(),
+            "interrupting", sub.isInterrupting(), "cancelledTokens", cancelled));
+
+        // Spawn del handler como child fire-and-forget (parentTokenId=null).
+        try {
+            ProcessInstanceEntity child = startProcessInternal(sub.getHandlerVersionId(), handlerVars,
+                null, instance.getTenantId(), userId, instance.getId(), null);
+            log.info("event_sub_process '{}' (interrupting={}) disparó handler child {} en instance {}",
+                sub.getElementCode(), sub.isInterrupting(), child.getId(), instance.getId());
+        } catch (Exception e) {
+            log.error("event_sub_process '{}' spawn del handler falló: {}", sub.getElementCode(), e.getMessage());
+            audit(instance, "event_subprocess.spawn_failed", sub.getElementId(), null, userId,
+                Map.of("elementCode", sub.getElementCode() == null ? "(none)" : sub.getElementCode(),
+                       "error", String.valueOf(e.getMessage())));
+            return false;
+        }
+        metricInc("bpm.event_subprocess.triggered", instance.getProcessdefId().toString());
+        return true;
     }
 
     // ─── user_task ──────────────────────────────────────────────────────────
@@ -3101,16 +3292,22 @@ public class ProcessEngine {
         UUID sigRefId = MessageCorrelationEntity.signalRefId(signalCode);
         List<MessageCorrelationEntity> matches = msgCorrRepo
             .findByMessagedefIdAndLifecycle(sigRefId, "waiting");
-        if (matches.isEmpty()) {
-            log.info("broadcastSignal: no listener for signalCode={}", signalCode);
-            return 0;
-        }
         int reactivated = 0;
         for (MessageCorrelationEntity mc : matches) {
             if (advanceFromCorrelation(mc, payload, "signal.received")) reactivated++;
         }
-        log.info("broadcastSignal: signalCode={} reactivated {}/{}",
-            signalCode, reactivated, matches.size());
+        // Ola 6.1 — event_sub_process suscriptos a este signal (independiente de las
+        // correlations de token: un handler dormante puede dispararse aunque no haya
+        // ningún catch de token esperando).
+        UUID tenantId = com.imap.platform.tenant.TenantContextHolder.get();
+        int subprocesses = tenantId == null ? 0
+            : fireEventSubprocessesForSignal(signalCode, payload, tenantId, null);
+        if (matches.isEmpty() && subprocesses == 0) {
+            log.info("broadcastSignal: no listener for signalCode={}", signalCode);
+        } else {
+            log.info("broadcastSignal: signalCode={} reactivated {}/{} tokens + {} event_sub_process",
+                signalCode, reactivated, matches.size(), subprocesses);
+        }
         return reactivated;
     }
 
