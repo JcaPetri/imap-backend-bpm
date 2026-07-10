@@ -619,7 +619,7 @@ public class ProcessEngine {
         job.setTenantId(instance.getTenantId());
         job.setProcessinstanceId(instance.getId());
         job.setTokenId(token.getId());
-        job.setJobType("continuation");
+        job.setJobType("async_continuation");   // valor ya permitido por el CHECK de V001
         job.setFireAt(now);
         job.setConfig(Map.of("elementId", el.id().toString(), "elementCode", el.code()));
         job.setLifecycle("scheduled");
@@ -2969,7 +2969,7 @@ public class ProcessEngine {
             boolean isBoundary = job.getConfig() != null
                 && Boolean.TRUE.equals(job.getConfig().get("boundary"));
 
-            if ("continuation".equals(job.getJobType())) {
+            if ("async_continuation".equals(job.getJobType())) {
                 fireContinuation(instance, token, job);
             } else if (isBoundary) {
                 fireBoundaryTimer(instance, token, job);
