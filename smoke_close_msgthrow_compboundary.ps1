@@ -88,7 +88,11 @@ $bodyTarget=@{
     )
 }
 $pdTarget=New-Pd $bodyTarget
-OKMsg "B: target creado (subscripcion message-start '$msgB')"
+# La subscripcion message-start se sincroniza en loader.load con tenant operativo
+# (no en activacion). Un arranque directo del target la puebla in-tenant.
+Start-Inst $pdTarget.processversionId @{} | Out-Null
+Start-Sleep -Milliseconds 300
+OKMsg "B: target creado + subscripcion message-start '$msgB' sincronizada"
 $bodyTrigger=@{
     header=@{ code="close_msgtrigger_$run"; name='Msg start trigger'; description='tmp'; lifecycle='active' }
     flowElements=@(
