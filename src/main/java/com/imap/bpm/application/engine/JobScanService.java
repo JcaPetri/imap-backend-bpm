@@ -82,4 +82,21 @@ public class JobScanService {
             .map(r -> new DueJob(UUID.fromString((String) r[0]), UUID.fromString((String) r[1])))
             .toList();
     }
+
+    /**
+     * Claim atómico de UN job puntual (para el immediate-kick de continuation).
+     * UPDATE scheduled→firing WHERE id. Devuelve true si ESTE claim gano (0 rows =
+     * el poll u otro kick ya lo tomo). El lock de fila hace que el poll
+     * (SELECT ... FOR UPDATE SKIP LOCKED WHERE scheduled) lo saltee → 0 doble-run.
+     */
+    @Transactional
+    public boolean claimJob(UUID jobId) {
+        em.createNativeQuery("SET LOCAL app.bypass_rls = 'true'").executeUpdate();
+        int updated = em.createNativeQuery("""
+            UPDATE bpm.bpm_pro_jobexecutor_tbl
+               SET lifecycle = 'firing', updated_at = NOW()
+             WHERE id = CAST(:jobId AS uuid) AND lifecycle = 'scheduled'
+            """).setParameter("jobId", jobId.toString()).executeUpdate();
+        return updated > 0;
+    }
 }
