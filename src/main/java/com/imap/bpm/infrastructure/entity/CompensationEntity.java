@@ -22,7 +22,9 @@
 
 package com.imap.bpm.infrastructure.entity;
 
+import io.hypersistence.utils.hibernate.type.json.JsonBinaryType;
 import jakarta.persistence.*;
+import org.hibernate.annotations.Type;
 
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -63,6 +65,7 @@ public class CompensationEntity {
     @Column(name = "completion_order", nullable = false)
     private Integer completionOrder;
 
+    @Type(JsonBinaryType.class)
     @Column(name = "completion_data_jsonb", columnDefinition = "jsonb")
     private Map<String, Object> completionData;
 
