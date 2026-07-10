@@ -107,10 +107,26 @@ public record ProcessDefinition(
     @SuppressWarnings("unchecked")
     public FlowElement findCompensationHandlerFor(String activityCode) {
         if (activityCode == null) return null;
-        return flowElements.stream()
+        // 1. Off-path (simplificado): service_task con config.compensationFor=activityCode.
+        FlowElement direct = flowElements.stream()
             .filter(fe -> "service_task".equals(fe.type()) && fe.config() != null)
             .filter(fe -> activityCode.equals(fe.config().get("compensationFor")))
             .findFirst().orElse(null);
+        if (direct != null) return direct;
+        // 2. Formal BPMN (cierre diferido Ola 5.4): boundary_event con
+        //    config.compensation=true adjunto a la activity; su flow saliente apunta
+        //    a la activity handler. Equivale al #1 pero con notación de boundary.
+        FlowElement compBoundary = flowElements.stream()
+            .filter(fe -> "boundary_event".equals(fe.type()) && fe.config() != null)
+            .filter(fe -> Boolean.TRUE.equals(fe.config().get("compensation")))
+            .filter(fe -> {
+                Object b = fe.config().get("boundary");
+                return b instanceof Map<?, ?> m && activityCode.equals(m.get("attachedTo"));
+            })
+            .findFirst().orElse(null);
+        if (compBoundary == null) return null;
+        List<SequenceFlow> out = outgoingFlows(compBoundary.id());
+        return out.isEmpty() ? null : findElementById(out.get(0).targetId());
     }
 
     /** Sequence flows salientes de un flowelement, ordenados. */

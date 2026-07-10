@@ -2132,7 +2132,8 @@ public class ProcessEngine {
      *                  ya completado sin terminar la instance (a diferencia del
      *                  end_event compensate=true). Permite "deshacer hasta acá y
      *                  seguir por otra rama".
-     * Message-throw se difiere (necesita la plumbing de message-start del receptor).
+     *   • message    → correlateMessage (si correlationKey) o startProcessByMessage
+     *                  (subscripciones message-start). Reusa el motor de mensajería.
      */
     private void handleThrowEvent(ProcessInstanceEntity instance, TokenEntity token,
                                    ProcessDefinition.FlowElement event, String throwType,
@@ -2158,6 +2159,36 @@ public class ProcessEngine {
                     Map.of("elementCode", event.code()));
                 metricInc("bpm.compensate.thrown", def);
                 log.info("intermediate throw '{}' disparó compensación LIFO", event.code());
+            }
+            case "message" -> {
+                // Ola 5 (cierre diferido) — message throw inline. Reusa el motor de
+                // mensajería ya existente: si trae correlationKey → correlateMessage
+                // (entrega a una instance corriendo con un catch armado); si no →
+                // startProcessByMessage (arranca las subscripciones message-start).
+                String messageCode = cfg != null && cfg.get("messageCode") != null
+                    ? String.valueOf(cfg.get("messageCode")) : null;
+                Map<String, Object> vars = currentVariablesAsMap(instance);
+                int correlated = 0, started = 0;
+                String mode;
+                if (messageCode == null) {
+                    mode = "noop";
+                } else if (cfg.get("correlationKey") != null
+                        && !String.valueOf(cfg.get("correlationKey")).isBlank()) {
+                    String key = resolveExpression(String.valueOf(cfg.get("correlationKey")), vars);
+                    correlated = correlateMessage(messageCode, key, vars);
+                    mode = "correlate";
+                } else {
+                    started = startProcessByMessage(messageCode, vars, null,
+                        instance.getTenantId(), userId).size();
+                    mode = "start";
+                }
+                audit(instance, "message.thrown", event.id(), token.getId(), userId, Map.of(
+                    "elementCode", event.code(),
+                    "messageCode", messageCode == null ? "(none)" : messageCode,
+                    "mode", mode, "correlated", correlated, "started", started));
+                metricInc("bpm.message.thrown", def);
+                log.info("intermediate throw '{}' message '{}' mode={} correlated={} started={}",
+                    event.code(), messageCode, mode, correlated, started);
             }
             default -> {
                 log.warn("intermediate throw '{}' tipo '{}' no soportado — passthrough",
