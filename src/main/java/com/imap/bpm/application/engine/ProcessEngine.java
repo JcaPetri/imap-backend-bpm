@@ -2219,16 +2219,7 @@ public class ProcessEngine {
         String collectionExpr = stringOr(mi.get("collection"), null);
         String elementVar = stringOr(mi.get("elementVar"), "item");
         String mode = stringOr(mi.get("mode"), "parallel");
-
-        // MVP: solo parallel. sequential se difiere (ver doc §8).
-        if (!"parallel".equals(mode)) {
-            log.warn("multiInstance '{}' mode '{}' no soportado (MVP=parallel) — passthrough",
-                activity.code(), mode);
-            audit(instance, "mi.unsupported_mode", activity.id(), anchor.getId(), userId,
-                Map.of("elementCode", activity.code(), "mode", mode));
-            consumeAndMoveToNext(instance, anchor, activity, def, userId);
-            return;
-        }
+        boolean sequential = "sequential".equals(mode);   // parallel = default (validado en create)
 
         List<Object> items = resolveCollectionValue(instance, collectionExpr);
         int n = items.size();
@@ -2255,29 +2246,40 @@ public class ProcessEngine {
             "cardinality", n,
             "elementVar", elementVar));
         metricInc("bpm.mi.split", def);
-        log.info("multiInstance '{}' split → {} ejecuciones (elementVar={})",
-            activity.code(), n, elementVar);
+        log.info("multiInstance '{}' split → {} ejecuciones (mode={}, elementVar={})",
+            activity.code(), n, mode, elementVar);
 
-        // Fan-out: 1 token hijo por item, ejecuta el cuerpo de la activity.
-        for (int i = 0; i < n; i++) {
-            Object item = items.get(i);
-            TokenEntity child = newToken(instance, activity.id(), anchor.getId());
-            child.setLifecycle("waiting");   // espera la completacion del cuerpo
-            tokenRepo.save(child);
-
-            Map<String, Object> loopCtx = new LinkedHashMap<>();
-            loopCtx.put(elementVar, item);
-            loopCtx.put("loopCounter", i);
-            loopCtx.put("nrOfInstances", n);
-
-            if ("user_task".equals(activity.type())) {
-                createMiUserTask(instance, child, activity, def, loopCtx, userId);
-            } else { // sub_process
-                spawnMiSubprocess(instance, child, activity, def, loopCtx, userId);
+        if (sequential) {
+            // Secuencial: solo el PRIMER item; los siguientes se crean al completar cada uno.
+            spawnMiChild(instance, anchor, activity, def, items.get(0), 0, n, elementVar, userId);
+        } else {
+            // Parallel: fan-out de los N a la vez.
+            for (int i = 0; i < n; i++) {
+                spawnMiChild(instance, anchor, activity, def, items.get(i), i, n, elementVar, userId);
             }
-            audit(instance, "mi.instance.created", activity.id(), child.getId(), userId,
-                Map.of("elementCode", activity.code(), "index", i));
         }
+    }
+
+    /** Crea 1 token hijo de MI + ejecuta el cuerpo de la activity para su item. */
+    private void spawnMiChild(ProcessInstanceEntity instance, TokenEntity anchor,
+                              ProcessDefinition.FlowElement activity, ProcessDefinition def,
+                              Object item, int index, int total, String elementVar, UUID userId) {
+        TokenEntity child = newToken(instance, activity.id(), anchor.getId());
+        child.setLifecycle("waiting");   // espera la completacion del cuerpo
+        tokenRepo.save(child);
+
+        Map<String, Object> loopCtx = new LinkedHashMap<>();
+        loopCtx.put(elementVar, item);
+        loopCtx.put("loopCounter", index);
+        loopCtx.put("nrOfInstances", total);
+
+        if ("user_task".equals(activity.type())) {
+            createMiUserTask(instance, child, activity, def, loopCtx, userId);
+        } else { // sub_process
+            spawnMiSubprocess(instance, child, activity, def, loopCtx, userId);
+        }
+        audit(instance, "mi.instance.created", activity.id(), child.getId(), userId,
+            Map.of("elementCode", activity.code(), "index", index));
     }
 
     /** Crea la TaskInstanceEntity de UNA ejecucion MI (mirror de handleUserTask, con item en el input_data). */
@@ -2380,29 +2382,95 @@ public class ProcessEngine {
             appendMiOutput(instance, activity, childOutput);
         }
 
-        // 4. Contar hijos consumidos vs N.
+        // 4. Estado del MI + config (mode / completionCondition).
         int completed = tokenRepo.countByParentTokenIdAndCurrentElementIdAndLifecycle(
             anchor.getId(), activityId, "consumed");
         int total = anchor.getMiCardinality() == null ? completed : anchor.getMiCardinality();
+        Map<String, Object> mi = activity != null ? activity.multiInstance() : null;
+        boolean sequential = mi != null && "sequential".equals(stringOr(mi.get("mode"), "parallel"));
+        String completionCondition = mi == null ? null : stringOr(mi.get("completionCondition"), null);
 
-        if (completed >= total) {
+        // Hijos aun vivos (waiting) de este MI — para nrOfActiveInstances + cancelacion.
+        List<TokenEntity> activeChildren = tokenRepo
+            .findByProcessinstanceIdAndCurrentElementIdAndLifecycle(instance.getId(), activityId, "waiting")
+            .stream().filter(t -> Objects.equals(t.getParentTokenId(), anchor.getId())).toList();
+
+        // completionCondition (quorum / fail-fast): se evalua tras cada hijo, con los counters
+        // MI + el output del hijo recien completado. Si da true → corte anticipado.
+        boolean conditionMet = false;
+        if (completionCondition != null && !completionCondition.isBlank()) {
+            Map<String, Object> ctx = currentVariablesAsMap(instance);
+            if (childOutput != null) ctx.putAll(childOutput);
+            ctx.put("nrOfInstances", total);
+            ctx.put("nrOfCompletedInstances", completed);
+            ctx.put("nrOfActiveInstances", activeChildren.size());
+            conditionMet = evaluateCondition(completionCondition, ctx);
+        }
+        boolean allDone = completed >= total;
+
+        if (conditionMet || allDone) {
+            int cancelled = 0;
+            if (conditionMet && !allDone) {   // corte anticipado → cancelar las que siguen vivas
+                cancelled = cancelRemainingMiChildren(instance, activeChildren, activityId, userId);
+            }
             anchor.setLifecycle("active");
             anchor.setMiCardinality(null);   // higiene: el ancla deja de ser MI al avanzar
             anchor.setUpdatedAt(now);
             tokenRepo.save(anchor);
-            audit(instance, "mi.join.completed", activityId, anchor.getId(), userId,
-                Map.of("elementCode", activity != null ? activity.code() : "?",
-                       "cardinality", total));
+            audit(instance, "mi.join.completed", activityId, anchor.getId(), userId, Map.of(
+                "elementCode", activity != null ? activity.code() : "?",
+                "cardinality", total, "completed", completed,
+                "reason", (conditionMet && !allDone) ? "completionCondition" : "all",
+                "cancelledRemaining", cancelled));
             metricInc("bpm.mi.completed", def);
-            log.info("multiInstance '{}' join completo ({}/{}) → avanzando",
-                activity != null ? activity.code() : "?", completed, total);
-            if (activity != null) {
-                consumeAndMoveToNext(instance, anchor, activity, def, userId);
+            log.info("multiInstance '{}' join completo ({}/{}, reason={}) → avanzando",
+                activity != null ? activity.code() : "?", completed, total,
+                (conditionMet && !allDone) ? "condition" : "all");
+            if (activity != null) consumeAndMoveToNext(instance, anchor, activity, def, userId);
+            return;
+        }
+
+        // No termino: sequential → crear el siguiente item; parallel → seguir esperando.
+        if (sequential && activity != null) {
+            List<Object> items = resolveCollectionValue(instance, stringOr(mi.get("collection"), null));
+            String elementVar = stringOr(mi.get("elementVar"), "item");
+            if (completed < items.size()) {
+                spawnMiChild(instance, anchor, activity, def, items.get(completed), completed, total, elementVar, userId);
+                audit(instance, "mi.sequential.next", activityId, anchor.getId(), userId,
+                    Map.of("index", completed, "total", total));
             }
         } else {
             audit(instance, "mi.join.progress", activityId, anchor.getId(), userId,
                 Map.of("completed", completed, "total", total));
         }
+    }
+
+    /** completionCondition: cancela las ejecuciones MI que siguen vivas (tasks + tokens + child-instances). */
+    private int cancelRemainingMiChildren(ProcessInstanceEntity instance, List<TokenEntity> children,
+                                          UUID activityId, UUID userId) {
+        OffsetDateTime now = OffsetDateTime.now();
+        int cancelled = 0;
+        for (TokenEntity c : children) {
+            for (TaskInstanceEntity t : taskRepo.findByTokenIdAndLifecycleIn(
+                    c.getId(), List.of("created", "assigned", "in_progress"))) {
+                t.setLifecycle("cancelled");
+                t.setUpdatedAt(now);
+                taskRepo.save(t);
+            }
+            // Hijos de sub_process MI (si el body era sub_process) → cancelar la instancia hija.
+            for (ProcessInstanceEntity child : instanceRepo.findByParentTokenId(c.getId())) {
+                if ("active".equals(child.getLifecycle())) {
+                    cancelInstance(child.getId(), "mi_completion_condition", userId);
+                }
+            }
+            c.setLifecycle("consumed");
+            c.setUpdatedAt(now);
+            tokenRepo.save(c);
+            audit(instance, "mi.instance.cancelled", activityId, c.getId(), userId,
+                Map.of("reason", "completionCondition"));
+            cancelled++;
+        }
+        return cancelled;
     }
 
     /** Acumula el output de una ejecucion MI en la var List config.multiInstance.outputCollection (si esta declarada). */
