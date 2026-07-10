@@ -32,4 +32,12 @@ public interface IncidentRepository extends JpaRepository<IncidentEntity, UUID> 
 
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);
+
+    /**
+     * Encarnación de un dispatch de service_task = cantidad de incidents ya abiertos
+     * para este (token, elemento). Semilla de la idempotency-key determinística: crece
+     * en cada incident-retry (key nueva → re-ejecuta) pero es estable ante crash/restart
+     * (un crash no abre incident → misma key → el receptor deduplica).
+     */
+    long countByTokenIdAndElementId(UUID tokenId, UUID elementId);
 }

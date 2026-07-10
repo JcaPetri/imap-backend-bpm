@@ -685,10 +685,19 @@ public class ProcessEngine {
         // Bearer token para que remote handlers puedan hacer s2s en cascade
         String bearerToken = com.imap.platform.security.BearerTokenHolder.get();
 
-        // 4.3 — idempotency-key: estable entre los retries internos del runWithRetry
-        // (misma invocacion → misma key → el receptor deduplica si el response se
-        // perdio y bpm reintenta). Fresca por invocacion (un incident-retry re-ejecuta).
-        String idempotencyKey = UUID.randomUUID().toString();
+        // 4.3 — idempotency-key DETERMINISTICA por (token, elemento, encarnación).
+        // La "encarnación" = cantidad de incidents ya abiertos para este (token,
+        // elemento). Propiedades:
+        //  • estable entre los retries internos del runWithRetry (misma invocación).
+        //  • estable ante CRASH+RESTART de bpm: un crash no abre incident → misma
+        //    encarnación → misma key → el receptor deduplica (no doble efecto). [4.3b D-lite]
+        //  • FRESCA en incident-retry intencional: el fallo abrió un incident →
+        //    encarnación+1 → key nueva → el receptor re-ejecuta.
+        // Sin schema nuevo: la tabla de incidents ya es el contador de encarnación.
+        long incarnation = incidentRepo.countByTokenIdAndElementId(token.getId(), current.id());
+        String idempotencyKey = UUID.nameUUIDFromBytes(
+            (token.getId() + ":" + current.id() + ":" + incarnation)
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
 
         com.imap.bpm.application.engine.servicetask.ServiceTaskContext ctx =
             new com.imap.bpm.application.engine.servicetask.ServiceTaskContext(
