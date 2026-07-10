@@ -56,6 +56,11 @@ public class ServiceTaskRunner {
         this.backoffMs = Math.max(0, backoffMs);
     }
 
+    /** true si el serviceCode tiene handler LOCAL (⇒ sync por default); false ⇒ remoto (⇒ async por default). */
+    public boolean hasLocalHandler(String serviceCode) {
+        return serviceCode != null && registry.hasLocalHandler(serviceCode);
+    }
+
     public ServiceTaskResult runWithRetry(ServiceTaskContext ctx) {
         ServiceTaskResult last = null;
         long currentBackoff = backoffMs;

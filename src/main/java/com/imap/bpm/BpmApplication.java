@@ -19,6 +19,10 @@ package com.imap.bpm;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import java.util.concurrent.Executor;
 
 /**
  * IMAP BPM Microservice — entry point.
@@ -43,9 +47,22 @@ import org.springframework.scheduling.annotation.EnableScheduling;
     "com.imap.eav.engine"   // lib eav-engine: EavTenantSession (RLS bridge)
 })
 @EnableScheduling   // habilita JobExecutorWorker (A2 — timers via @Scheduled)
+@EnableAsync        // habilita el immediate-kick de continuation (4.1 async continuation)
 public class BpmApplication {
 
     public static void main(String[] args) {
         SpringApplication.run(BpmApplication.class, args);
+    }
+
+    /** Pool para el immediate-kick de continuation jobs (near-instant; el @Scheduled poll es el fallback durable). */
+    @Bean("bpmAsyncExecutor")
+    public Executor bpmAsyncExecutor() {
+        ThreadPoolTaskExecutor ex = new ThreadPoolTaskExecutor();
+        ex.setCorePoolSize(2);
+        ex.setMaxPoolSize(8);
+        ex.setQueueCapacity(500);
+        ex.setThreadNamePrefix("bpm-cont-");
+        ex.initialize();
+        return ex;
     }
 }

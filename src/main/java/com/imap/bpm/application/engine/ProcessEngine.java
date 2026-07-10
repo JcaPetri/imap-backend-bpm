@@ -117,6 +117,11 @@ public class ProcessEngine {
     @org.springframework.beans.factory.annotation.Autowired
     private ProcessEngine self;
 
+    /** Immediate-kick de continuation jobs (4.1). @Lazy rompe el ciclo ProcessEngine↔ContinuationDispatcher. */
+    @org.springframework.context.annotation.Lazy
+    @org.springframework.beans.factory.annotation.Autowired
+    private ContinuationDispatcher continuationDispatcher;
+
     public ProcessEngine(ProcessDefinitionLoader loader,
                          ProcessInstanceRepository instanceRepo,
                          TokenRepository tokenRepo,
@@ -438,7 +443,13 @@ public class ProcessEngine {
                 break;
 
             case "service_task":
-                handleServiceTask(instance, token, current, def, userId);
+                // 4.1 async continuation: service_task remoto (o config.async=true) corre en su
+                // propia tx via continuation job → aislamiento de fallas + retry granular.
+                if (shouldRunAsync(current)) {
+                    scheduleContinuation(instance, token, current, userId);
+                } else {
+                    handleServiceTask(instance, token, current, def, userId);
+                }
                 break;
 
             case "exclusive_gateway":
@@ -571,6 +582,79 @@ public class ProcessEngine {
 
         // Recursión hasta wait state
         advanceToken(instance, token, def, userId);
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 4.1 async continuation — el service_task corre en su PROPIA transaccion
+    //
+    // Regla (cerrada con Juan): un service_task REMOTO (serviceCode sin handler
+    // local → HTTP S2S) corre async por default; el resto es sync salvo
+    // config.async=true (opt-in) / config.async=false (opt-out). Async = mejor
+    // aislamiento de fallas + granularidad de retry + evita transacciones gordas.
+    //
+    // Mecanismo: el token queda 'waiting' + se agenda un continuation job; el
+    // ContinuationDispatcher lo dispara NEAR-INSTANT tras el commit (immediate-kick),
+    // con el @Scheduled poll del JobExecutorWorker como fallback durable.
+    // ════════════════════════════════════════════════════════════════════════
+
+    private boolean shouldRunAsync(ProcessDefinition.FlowElement el) {
+        if (!"service_task".equals(el.type())) return false;
+        Object async = el.config() == null ? null : el.config().get("async");
+        if (Boolean.TRUE.equals(async)) return true;    // opt-in explicito
+        if (Boolean.FALSE.equals(async)) return false;  // opt-out explicito
+        String serviceCode = el.config() == null ? null : (String) el.config().get("serviceCode");
+        return serviceCode != null && !serviceTaskRunner.hasLocalHandler(serviceCode); // remoto → async default
+    }
+
+    /** Deja el token en 'waiting' + agenda el continuation job + immediate-kick. */
+    private void scheduleContinuation(ProcessInstanceEntity instance, TokenEntity token,
+                                      ProcessDefinition.FlowElement el, UUID userId) {
+        OffsetDateTime now = OffsetDateTime.now();
+        token.setLifecycle("waiting");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        JobExecutorEntity job = new JobExecutorEntity();
+        job.setId(UUID.randomUUID());
+        job.setTenantId(instance.getTenantId());
+        job.setProcessinstanceId(instance.getId());
+        job.setTokenId(token.getId());
+        job.setJobType("continuation");
+        job.setFireAt(now);
+        job.setConfig(Map.of("elementId", el.id().toString(), "elementCode", el.code()));
+        job.setLifecycle("scheduled");
+        job.setRetries(0);
+        job.setMaxRetries(3);
+        job.setStateId(DEFAULT_STATE_ACTIVE);
+        job.setCreatedAt(now);
+        job.setUpdatedAt(now);
+        jobRepo.save(job);
+
+        audit(instance, "continuation.scheduled", el.id(), token.getId(), userId,
+            Map.of("elementCode", el.code(), "jobId", job.getId().toString()));
+        metricInc("bpm.continuation.scheduled", instance.getProcessdefId().toString());
+        // Near-instant: dispara apenas commitee esta tx (el poll es el fallback durable).
+        continuationDispatcher.kickAfterCommit(job.getId(), instance.getTenantId());
+    }
+
+    /** Ejecuta el continuation job: reactiva el token y corre el service_task INLINE (el async ya se consumio). */
+    private void fireContinuation(ProcessInstanceEntity instance, TokenEntity token, JobExecutorEntity job) {
+        OffsetDateTime now = OffsetDateTime.now();
+        token.setLifecycle("active");
+        token.setUpdatedAt(now);
+        tokenRepo.save(token);
+
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        UUID elementId = UUID.fromString((String) job.getConfig().get("elementId"));
+        ProcessDefinition.FlowElement current = def.findElementById(elementId);
+        if (current == null) {
+            log.error("fireContinuation: element {} gone", elementId);
+            return;
+        }
+        audit(instance, "continuation.executed", elementId, token.getId(), null,
+            Map.of("elementCode", current.code(), "jobId", job.getId().toString()));
+        metricInc("bpm.continuation.executed", instance.getProcessdefId().toString());
+        handleServiceTask(instance, token, current, def, null);
     }
 
     // ─── service_task (Fase 0.B.1 — ServiceTaskRegistry) ───────────────────
@@ -2881,11 +2965,13 @@ public class ProcessEngine {
                 return;
             }
 
-            // B2 — dispatch: boundary vs intermediate_event timer
+            // dispatch por job_type: continuation (4.1) vs boundary vs intermediate_event timer
             boolean isBoundary = job.getConfig() != null
                 && Boolean.TRUE.equals(job.getConfig().get("boundary"));
 
-            if (isBoundary) {
+            if ("continuation".equals(job.getJobType())) {
+                fireContinuation(instance, token, job);
+            } else if (isBoundary) {
                 fireBoundaryTimer(instance, token, job);
             } else {
                 fireIntermediateTimer(instance, token, job);
