@@ -641,6 +641,9 @@ public class ProcessdefManagementService {
         // event_based_gateway: ≥2 outgoing y todos apuntan a intermediate_event
         validateEventGateways(req.flowElements(), req.sequenceFlows());
 
+        // compensation handler: compensationFor referencia un service_task existente
+        validateCompensationHandlers(req.flowElements());
+
         // Task forms: flowElementCode existe + es user_task + entityDefCode existe (s2s)
         if (req.taskForms() != null) {
             Map<String, String> codeToType = new HashMap<>();
@@ -689,6 +692,16 @@ public class ProcessdefManagementService {
             if (!(bObj instanceof Map)) continue;
             Object attachedTo = ((Map<String, Object>) bObj).get("attachedTo");
             if (attachedTo instanceof String at && !at.isBlank()) {
+                outgoing.computeIfAbsent(at, k -> new ArrayList<>()).add(fe.code());
+            }
+        }
+        // Idem para compensation handlers: service_task off-path con
+        // config.compensationFor = code del activity compensable. Alcanzable si
+        // el activity lo es → arista virtual activity -> handler.
+        for (CreateProcessdefRequest.FlowElement fe : elements) {
+            if (!"service_task".equals(fe.type()) || fe.config() == null) continue;
+            Object cf = fe.config().get("compensationFor");
+            if (cf instanceof String at && !at.isBlank()) {
                 outgoing.computeIfAbsent(at, k -> new ArrayList<>()).add(fe.code());
             }
         }
@@ -741,6 +754,41 @@ public class ProcessdefManagementService {
                         "event_based_gateway '" + gw + "' outgoing must target intermediate_event — '"
                         + t + "' is " + codeToType.get(t));
                 }
+            }
+        }
+    }
+
+    /**
+     * Compensation handler (Saga): un service_task con config.compensationFor debe
+     * referenciar un service_task existente (el activity compensable) y declarar su
+     * propio serviceCode (el undo). El handler va off-path (sin sequence flow).
+     */
+    private void validateCompensationHandlers(List<CreateProcessdefRequest.FlowElement> elements) {
+        Map<String, String> codeToType = new HashMap<>();
+        for (CreateProcessdefRequest.FlowElement fe : elements) {
+            codeToType.put(fe.code(), fe.type());
+        }
+        for (CreateProcessdefRequest.FlowElement fe : elements) {
+            if (fe.config() == null) continue;
+            Object cf = fe.config().get("compensationFor");
+            if (cf == null) continue;
+            if (!"service_task".equals(fe.type())) {
+                throw new IllegalArgumentException(
+                    "compensationFor only allowed on service_task — '" + fe.code() + "' is " + fe.type());
+            }
+            if (!(cf instanceof String target) || target.isBlank()) {
+                throw new IllegalArgumentException(
+                    "compensationFor must be a non-blank element code @'" + fe.code() + "'");
+            }
+            if (!"service_task".equals(codeToType.get(target))) {
+                throw new IllegalArgumentException(
+                    "compensationFor '" + target + "' must reference an existing service_task @'"
+                    + fe.code() + "'");
+            }
+            Object svc = fe.config().get("serviceCode");
+            if (!(svc instanceof String s) || s.isBlank()) {
+                throw new IllegalArgumentException(
+                    "compensation handler '" + fe.code() + "' requires its own serviceCode (the undo)");
             }
         }
     }
