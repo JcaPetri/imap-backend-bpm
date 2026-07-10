@@ -850,6 +850,14 @@ public class ProcessEngine {
             compensateInstance(instance, userId);
         }
 
+        // Terminate end event: config.terminate=true mata TODOS los tokens vivos
+        // de la instance (aborta ramas paralelas en curso) y la completa ya. Se
+        // resuelve aca y se retorna (no sigue el flujo normal de fin).
+        if (endEvent.config() != null && Boolean.TRUE.equals(endEvent.config().get("terminate"))) {
+            terminateInstance(instance, endEvent, token, userId);
+            return;
+        }
+
         token.setLifecycle("consumed");
         token.setUpdatedAt(OffsetDateTime.now());
         tokenRepo.save(token);
@@ -880,6 +888,62 @@ public class ProcessEngine {
                 } else {
                     auditFireAndForgetChildCompletion(instance, userId);
                 }
+            }
+        }
+    }
+
+    /**
+     * Terminate end event: aborta la instance. Consume TODOS los tokens vivos
+     * (active + waiting), des-arma sus jobs scheduled y correlations waiting,
+     * cancela las tasks vivas, y marca la instance completed inmediatamente.
+     * Uso: un rechazo fatal en una rama mata las ramas paralelas en curso.
+     */
+    private void terminateInstance(ProcessInstanceEntity instance, ProcessDefinition.FlowElement endEvent,
+                                   TokenEntity endToken, UUID userId) {
+        OffsetDateTime now = OffsetDateTime.now();
+        int killed = 0;
+        for (TokenEntity t : tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+                instance.getId(), List.of("active", "waiting"))) {
+            for (JobExecutorEntity job : jobRepo.findByTokenIdAndLifecycle(t.getId(), "scheduled")) {
+                job.setLifecycle("cancelled");
+                job.setUpdatedAt(now);
+                jobRepo.save(job);
+            }
+            for (MessageCorrelationEntity mc : msgCorrRepo.findByTokenIdAndLifecycle(t.getId(), "waiting")) {
+                mc.setLifecycle("cancelled");
+                mc.setUpdatedAt(now);
+                msgCorrRepo.save(mc);
+            }
+            for (TaskInstanceEntity task : taskRepo.findByTokenIdAndLifecycleIn(
+                    t.getId(), List.of("created", "assigned", "in_progress"))) {
+                task.setLifecycle("cancelled");
+                task.setUpdatedAt(now);
+                taskRepo.save(task);
+            }
+            t.setLifecycle("consumed");
+            t.setUpdatedAt(now);
+            tokenRepo.save(t);
+            killed++;
+        }
+
+        instance.setLifecycle("completed");
+        instance.setEndedAt(now);
+        instance.setUpdatedAt(now);
+        instanceRepo.save(instance);
+        audit(instance, "instance.terminated", endEvent.id(), endToken.getId(), userId, Map.of(
+            "endEventCode", endEvent.code(),
+            "killedTokens", killed
+        ));
+        metricInc("bpm.instance.terminated", instance.getProcessdefId().toString());
+        log.info("ProcessInstanceEntity {} TERMINATED via {} (killed {} tokens)",
+            instance.getId(), endEvent.code(), killed);
+
+        // Si es child de un sub_process, notificar/auditar al parent igual que un fin normal.
+        if (instance.getParentInstanceId() != null) {
+            if (instance.getParentTokenId() != null) {
+                notifyParentOfSubprocessCompletion(instance, userId);
+            } else {
+                auditFireAndForgetChildCompletion(instance, userId);
             }
         }
     }
@@ -1016,6 +1080,15 @@ public class ProcessEngine {
                 jobCfg.put("attachedTaskInstanceId", attachedTaskInstanceId.toString());
             jobCfg.put("interrupting", interrupting);
             jobCfg.put("delaySeconds", delaySeconds);
+            // Timer ciclico (solo non-interrupting): repeatEverySeconds + maxRepeats.
+            // Al disparar, reprograma el proximo hasta agotar maxRepeats (o hasta que
+            // la activity se complete → cancelBoundaryJobsForToken cancela el pendiente).
+            if (!interrupting && timerCfg.get("repeatEverySeconds") != null) {
+                jobCfg.put("repeatEverySeconds", ((Number) timerCfg.get("repeatEverySeconds")).longValue());
+                Object maxR = timerCfg.get("maxRepeats");
+                jobCfg.put("maxRepeats", maxR instanceof Number mn ? mn.intValue() : 10);
+                jobCfg.put("repeatCount", 1);
+            }
             job.setConfig(jobCfg);
             job.setLifecycle("scheduled");
             job.setRetries(0);
@@ -1387,7 +1460,50 @@ public class ProcessEngine {
             return;
         }
 
-        // M-in N-out: no soportado en MVP — bloqueamos el token
+        // ── M-in / N-out: JOIN-then-SPLIT combinado ──────────────────────────
+        // Espera a los M hermanos (como el JOIN) y luego emite N tokens (como el
+        // SPLIT). Sincroniza los flujos entrantes y re-abre el paralelismo.
+        if (incoming.size() > 1 && outgoing.size() > 1) {
+            token.setLifecycle("waiting");
+            token.setUpdatedAt(now);
+            tokenRepo.save(token);
+            UUID myParent = token.getParentTokenId();
+            List<TokenEntity> siblings = tokenRepo
+                .findByProcessinstanceIdAndCurrentElementIdAndLifecycle(instance.getId(), gateway.id(), "waiting")
+                .stream().filter(t -> Objects.equals(t.getParentTokenId(), myParent)).toList();
+            if (siblings.size() < incoming.size()) {
+                return;   // esperar mas ramas entrantes
+            }
+            for (TokenEntity sib : siblings) {
+                sib.setLifecycle("consumed");
+                sib.setUpdatedAt(now);
+                tokenRepo.save(sib);
+            }
+            UUID grandparent = myParent == null ? null
+                : tokenRepo.findById(myParent).map(TokenEntity::getParentTokenId).orElse(null);
+            audit(instance, "gateway.joinsplit", gateway.id(), null, userId, Map.of(
+                "gatewayCode", gateway.code(),
+                "branchesJoined", siblings.size(),
+                "branchesSplit", outgoing.size()
+            ));
+            metricInc("bpm.gateway.join", def);
+            metricInc("bpm.gateway.split", def);
+            // Fan-out N tokens, cada uno hijo del grandparent (nivel previo al join).
+            for (ProcessDefinition.SequenceFlow sf : outgoing) {
+                TokenEntity child = newToken(instance, sf.targetId(), grandparent);
+                tokenRepo.save(child);
+                ProcessDefinition.FlowElement target = def.findElementById(sf.targetId());
+                audit(instance, "token.entered", sf.targetId(), child.getId(), userId, Map.of(
+                    "elementCode", target != null ? target.code() : "?",
+                    "elementType", target != null ? target.type() : "?",
+                    "fromJoinSplit", gateway.code()
+                ));
+                advanceToken(instance, child, def, userId);
+            }
+            return;
+        }
+
+        // shape realmente inválido (ej 1-in/1-out ya cubierto; aca 0 flows)
         log.warn("parallel_gateway {} has unsupported shape in={} out={} — token blocked",
             gateway.code(), incoming.size(), outgoing.size());
         token.setLifecycle("waiting");
@@ -2785,6 +2901,42 @@ public class ProcessEngine {
             job.getId(),  // skip self cuando cancela siblings
             "boundary.fired", "boundary_timer_fired",
             Map.of("trigger", "timer"));
+
+        // Timer ciclico: si es non-interrupting y quedan repeticiones, reprograma
+        // el proximo. El activityToken sigue waiting (non-interrupting no lo consume),
+        // asi que el nuevo job es valido. Cuando la activity se completa,
+        // cancelBoundaryJobsForToken cancela el job scheduled pendiente.
+        if (!interrupting && cfg.get("repeatEverySeconds") != null) {
+            int repeatCount = cfg.get("repeatCount") instanceof Number rc ? rc.intValue() : 1;
+            int maxRepeats  = cfg.get("maxRepeats") instanceof Number mr ? mr.intValue() : 10;
+            if (repeatCount < maxRepeats) {
+                long every = ((Number) cfg.get("repeatEverySeconds")).longValue();
+                OffsetDateTime now = OffsetDateTime.now();
+                JobExecutorEntity next = new JobExecutorEntity();
+                next.setId(UUID.randomUUID());
+                next.setTenantId(instance.getTenantId());
+                next.setProcessinstanceId(instance.getId());
+                next.setTokenId(activityToken.getId());
+                next.setJobType("timer");
+                next.setFireAt(now.plusSeconds(every));
+                Map<String, Object> nextCfg = new LinkedHashMap<>(cfg);
+                nextCfg.put("repeatCount", repeatCount + 1);
+                next.setConfig(nextCfg);
+                next.setLifecycle("scheduled");
+                next.setRetries(0);
+                next.setMaxRetries(3);
+                next.setStateId(DEFAULT_STATE_ACTIVE);
+                next.setCreatedAt(now);
+                next.setUpdatedAt(now);
+                jobRepo.save(next);
+                audit(instance, "boundary.timer.rescheduled", boundaryElementId, activityToken.getId(), null, Map.of(
+                    "boundaryCode", boundaryCode,
+                    "repeatCount", repeatCount + 1,
+                    "maxRepeats", maxRepeats,
+                    "fireAt", next.getFireAt().toString()
+                ));
+            }
+        }
     }
 
     /**
