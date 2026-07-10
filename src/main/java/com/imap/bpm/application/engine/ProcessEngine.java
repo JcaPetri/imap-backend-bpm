@@ -685,12 +685,18 @@ public class ProcessEngine {
         // Bearer token para que remote handlers puedan hacer s2s en cascade
         String bearerToken = com.imap.platform.security.BearerTokenHolder.get();
 
+        // 4.3 — idempotency-key: estable entre los retries internos del runWithRetry
+        // (misma invocacion → misma key → el receptor deduplica si el response se
+        // perdio y bpm reintenta). Fresca por invocacion (un incident-retry re-ejecuta).
+        String idempotencyKey = UUID.randomUUID().toString();
+
         com.imap.bpm.application.engine.servicetask.ServiceTaskContext ctx =
             new com.imap.bpm.application.engine.servicetask.ServiceTaskContext(
-                serviceCode, current, instance, token, userId, bearerToken, vars);
+                serviceCode, current, instance, token, userId, bearerToken, vars, idempotencyKey);
 
         audit(instance, "service_task.invoked", current.id(), token.getId(), userId,
-            Map.of("elementCode", current.code(), "serviceCode", serviceCode == null ? "(none)" : serviceCode));
+            Map.of("elementCode", current.code(), "serviceCode", serviceCode == null ? "(none)" : serviceCode,
+                   "idempotencyKey", idempotencyKey));
 
         com.imap.bpm.application.engine.servicetask.ServiceTaskResult result;
         try {
@@ -993,7 +999,8 @@ public class ProcessEngine {
                 com.imap.bpm.application.engine.servicetask.ServiceTaskContext ctx =
                     new com.imap.bpm.application.engine.servicetask.ServiceTaskContext(
                         serviceCode, handler, instance, null /* sin token vivo */, userId, bearer,
-                        c.getCompletionData() == null ? Map.of() : c.getCompletionData());
+                        c.getCompletionData() == null ? Map.of() : c.getCompletionData(),
+                        UUID.randomUUID().toString());
                 try {
                     r = serviceTaskRunner.runWithRetry(ctx);
                 } catch (Exception e) {
