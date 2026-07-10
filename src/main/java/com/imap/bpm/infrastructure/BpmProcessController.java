@@ -97,6 +97,7 @@ public class BpmProcessController {
     private final JobExecutorRepository jobRepo;
     private final MessageCorrelationRepository msgCorrRepo;
     private final BpmInboxEventRepository inboxRepo;
+    private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
     private final ScoreService scoreService;
     private final SseEventBus sseEventBus;
     private final com.imap.bpm.application.ProcessdefManagementService processdefMgmt;
@@ -115,6 +116,7 @@ public class BpmProcessController {
                                 JobExecutorRepository jobRepo,
                                 MessageCorrelationRepository msgCorrRepo,
                                 BpmInboxEventRepository inboxRepo,
+                                com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo,
                                 ScoreService scoreService,
                                 SseEventBus sseEventBus,
                                 com.imap.bpm.application.ProcessdefManagementService processdefMgmt) {
@@ -129,6 +131,7 @@ public class BpmProcessController {
         this.jobRepo = jobRepo;
         this.msgCorrRepo = msgCorrRepo;
         this.inboxRepo = inboxRepo;
+        this.compensationRepo = compensationRepo;
         this.scoreService = scoreService;
         this.sseEventBus = sseEventBus;
         this.processdefMgmt = processdefMgmt;
@@ -882,6 +885,7 @@ public class BpmProcessController {
         long audits = auditRepo.deleteByProcessinstanceId(instanceId);
         long jobs   = jobRepo.deleteByProcessinstanceId(instanceId);
         long corrs  = msgCorrRepo.deleteByProcessinstanceId(instanceId);
+        long comps  = compensationRepo.deleteByProcessinstanceId(instanceId);
         instanceRepo.delete(instance);
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -894,7 +898,8 @@ public class BpmProcessController {
             "tokens", tokens,
             "auditLogs", audits,
             "jobs", jobs,
-            "messageCorrelations", corrs
+            "messageCorrelations", corrs,
+            "compensations", comps
         ));
         return ResponseEntity.ok(out);
     }

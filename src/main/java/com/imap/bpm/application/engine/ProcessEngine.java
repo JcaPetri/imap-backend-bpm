@@ -103,6 +103,7 @@ public class ProcessEngine {
     private final com.imap.bpm.application.engine.servicetask.ServiceTaskRunner serviceTaskRunner;
     private final com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo;
     private final com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService;
+    private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
 
     /**
      * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
@@ -132,7 +133,8 @@ public class ProcessEngine {
                          com.imap.bpm.infrastructure.sse.SseEventBus sseBus,
                          com.imap.bpm.application.engine.servicetask.ServiceTaskRunner serviceTaskRunner,
                          com.imap.bpm.infrastructure.repository.MessageStartSubscriptionRepository msgStartSubRepo,
-                         com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService) {
+                         com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService,
+                         com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -150,6 +152,7 @@ public class ProcessEngine {
         this.serviceTaskRunner = serviceTaskRunner;
         this.msgStartSubRepo = msgStartSubRepo;
         this.taskAssignmentService = taskAssignmentService;
+        this.compensationRepo = compensationRepo;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -619,6 +622,9 @@ public class ProcessEngine {
                 Map.of("elementCode", current.code(),
                        "serviceCode", serviceCode == null ? "(none)" : serviceCode,
                        "resultVarsCount", result.resultVariables() == null ? 0 : result.resultVariables().size()));
+            // Saga: si este activity es compensable (tiene handler compensationFor),
+            // registrar la compensacion con snapshot de vars (LIFO en el trigger).
+            registerCompensationIfAny(instance, current, def, userId);
             consumeAndMoveToNext(instance, token, current, def, userId);
             return;
         }
@@ -705,10 +711,141 @@ public class ProcessEngine {
         return fired > 0;
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // Compensation / Saga — rollback de negocio en orquestacion distribuida
+    //
+    // Un service_task compensable declara su undo con un handler OFF-PATH:
+    // otro service_task con config.compensationFor = <codeDelCompensable>. Al
+    // completar OK el compensable, se registra una fila en bpm_pro_compensation_tbl
+    // con snapshot de variables. Un end_event con config.compensate=true dispara
+    // la compensacion: corre los handlers en LIFO (inverso a la completacion) via
+    // ServiceTaskRunner (mismo dispatch HTTP S2S que un service_task normal).
+    //
+    // Compone con el feature ② (boundary error): un service_task falla → boundary
+    // error → rama → end_event compensate=true → deshace lo previo. Es el patron
+    // Saga sin 2PC (que la Regla de Oro HTTP-only prohibe de facto).
+    // ════════════════════════════════════════════════════════════════════════
+
+    /** Registra la compensacion de un activity compensable recien completado (si tiene handler). */
+    private void registerCompensationIfAny(ProcessInstanceEntity instance,
+                                           ProcessDefinition.FlowElement activity,
+                                           ProcessDefinition def, UUID userId) {
+        ProcessDefinition.FlowElement handler = def.findCompensationHandlerFor(activity.code());
+        if (handler == null) return;
+
+        OffsetDateTime now = OffsetDateTime.now();
+        CompensationEntity c = new CompensationEntity();
+        c.setId(UUID.randomUUID());
+        c.setTenantId(instance.getTenantId());
+        c.setProcessinstanceId(instance.getId());
+        c.setCompletedElementId(activity.id());
+        c.setCompensationElementId(handler.id());
+        c.setCompletionOrder(compensationRepo.countByProcessinstanceId(instance.getId()));
+        c.setCompletionData(currentVariablesAsMap(instance));
+        c.setLifecycle("registered");
+        c.setStateId(DEFAULT_STATE_ACTIVE);
+        c.setCreatedAt(now);
+        c.setUpdatedAt(now);
+        compensationRepo.save(c);
+
+        audit(instance, "compensation.registered", activity.id(), null, userId, Map.of(
+            "compensableCode", activity.code(),
+            "handlerCode", handler.code(),
+            "completionOrder", c.getCompletionOrder()
+        ));
+        metricInc("bpm.compensation.registered", def);
+    }
+
+    /**
+     * Dispara la compensacion LIFO de la instance: ejecuta los handlers
+     * registrados en orden inverso a la completacion (completion_order DESC).
+     * Cada handler corre via ServiceTaskRunner con el snapshot de vars de cuando
+     * el activity original se completo. Los fallos de un handler NO abortan el
+     * resto (best-effort): se marca 'failed' y se sigue (rollback parcial > nada).
+     */
+    private void compensateInstance(ProcessInstanceEntity instance, UUID userId) {
+        List<CompensationEntity> regs = compensationRepo
+            .findByProcessinstanceIdAndLifecycleOrderByCompletionOrderDesc(instance.getId(), "registered");
+        if (regs.isEmpty()) {
+            audit(instance, "compensation.none", null, null, userId, Map.of());
+            return;
+        }
+
+        ProcessDefinition def = loader.load(instance.getProcessversionId(), null, instance.getTenantId());
+        String bearer = com.imap.platform.security.BearerTokenHolder.get();
+        audit(instance, "compensation.triggered", null, null, userId, Map.of("count", regs.size()));
+        metricInc("bpm.compensation.triggered", def);
+
+        int done = 0, failed = 0;
+        for (CompensationEntity c : regs) {
+            OffsetDateTime now = OffsetDateTime.now();
+            ProcessDefinition.FlowElement handler = def.findElementById(c.getCompensationElementId());
+            String serviceCode = (handler == null || handler.config() == null)
+                ? null : (String) handler.config().get("serviceCode");
+
+            c.setLifecycle("compensating");
+            c.setUpdatedAt(now);
+            compensationRepo.save(c);
+
+            com.imap.bpm.application.engine.servicetask.ServiceTaskResult r;
+            if (handler == null || serviceCode == null) {
+                r = com.imap.bpm.application.engine.servicetask.ServiceTaskResult.fail(
+                    "COMP_NO_HANDLER", "compensation handler o serviceCode ausente");
+            } else {
+                com.imap.bpm.application.engine.servicetask.ServiceTaskContext ctx =
+                    new com.imap.bpm.application.engine.servicetask.ServiceTaskContext(
+                        serviceCode, handler, instance, null /* sin token vivo */, userId, bearer,
+                        c.getCompletionData() == null ? Map.of() : c.getCompletionData());
+                try {
+                    r = serviceTaskRunner.runWithRetry(ctx);
+                } catch (Exception e) {
+                    r = com.imap.bpm.application.engine.servicetask.ServiceTaskResult.fail(
+                        "COMP_EXCEPTION", e.getClass().getSimpleName() + ": " + e.getMessage());
+                }
+            }
+
+            OffsetDateTime end = OffsetDateTime.now();
+            if (r.isSuccess() || r.isPending()) {
+                c.setLifecycle("compensated");
+                c.setCompensatedAt(end);
+                c.setUpdatedAt(end);
+                compensationRepo.save(c);
+                audit(instance, "compensation.executed", c.getCompletedElementId(), null, userId, Map.of(
+                    "handlerCode", handler != null ? handler.code() : "?",
+                    "serviceCode", serviceCode == null ? "(none)" : serviceCode,
+                    "completionOrder", c.getCompletionOrder()
+                ));
+                done++;
+            } else {
+                c.setLifecycle("failed");
+                c.setUpdatedAt(end);
+                compensationRepo.save(c);
+                audit(instance, "compensation.failed", c.getCompletedElementId(), null, userId, Map.of(
+                    "handlerCode", handler != null ? handler.code() : "?",
+                    "serviceCode", serviceCode == null ? "(none)" : serviceCode,
+                    "errorCode", r.errorCode() == null ? "UNKNOWN" : r.errorCode(),
+                    "errorMessage", r.errorMessage() == null ? "" : r.errorMessage()
+                ));
+                failed++;
+            }
+        }
+        audit(instance, "compensation.completed", null, null, userId, Map.of(
+            "compensated", done, "failed", failed, "total", regs.size()
+        ));
+        log.info("compensateInstance {} → {} compensated, {} failed (LIFO)",
+            instance.getId(), done, failed);
+    }
+
     // ─── end_event ──────────────────────────────────────────────────────────
 
     private void handleEndEvent(ProcessInstanceEntity instance, TokenEntity token,
                                  ProcessDefinition.FlowElement endEvent, UUID userId) {
+        // Saga trigger: un end_event con config.compensate=true corre la
+        // compensacion LIFO de lo ya completado ANTES de terminar la instance.
+        if (endEvent.config() != null && Boolean.TRUE.equals(endEvent.config().get("compensate"))) {
+            compensateInstance(instance, userId);
+        }
+
         token.setLifecycle("consumed");
         token.setUpdatedAt(OffsetDateTime.now());
         tokenRepo.save(token);

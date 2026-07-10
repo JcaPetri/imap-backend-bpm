@@ -100,6 +100,19 @@ public record ProcessDefinition(
             .toList();
     }
 
+    /**
+     * Compensation handler de una activity: un service_task off-path marcado con
+     * config.compensationFor = elementCode del activity compensable. Null si no hay.
+     */
+    @SuppressWarnings("unchecked")
+    public FlowElement findCompensationHandlerFor(String activityCode) {
+        if (activityCode == null) return null;
+        return flowElements.stream()
+            .filter(fe -> "service_task".equals(fe.type()) && fe.config() != null)
+            .filter(fe -> activityCode.equals(fe.config().get("compensationFor")))
+            .findFirst().orElse(null);
+    }
+
     /** Sequence flows salientes de un flowelement, ordenados. */
     public List<SequenceFlow> outgoingFlows(UUID sourceId) {
         return sequenceFlows.stream()
