@@ -72,6 +72,7 @@ public class ServiceTaskExecuteController {
         // se llama típicamente desde BPM (que ya tiene la entity) o desde tests. Los
         // handlers locales que necesitan el entity object deben fetcharlo via repo
         // usando los IDs del body.
+        Object idem = body.get("idempotencyKey");
         ServiceTaskContext ctx = new ServiceTaskContext(
             serviceCode,
             null,                                                    // flowElement no se reconstruye
@@ -79,7 +80,8 @@ public class ServiceTaskExecuteController {
             null,                                                    // token no se reconstruye
             null,                                                    // userId
             null,                                                    // bearerToken (lo lleva el JWT del request si aplica)
-            asMap(body.get("variables"))
+            asMap(body.get("variables")),
+            idem != null ? idem.toString() : java.util.UUID.randomUUID().toString()   // 4.3 idempotency-key
         );
 
         ServiceTaskResult result = registry.dispatch(ctx);

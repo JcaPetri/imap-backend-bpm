@@ -167,12 +167,17 @@ public class ServiceTaskRegistry {
         body.put("flowElementConfig", ctx.flowElement() != null ? ctx.flowElement().config() : Collections.emptyMap());
         body.put("userId", ctx.userId() != null ? ctx.userId().toString() : null);
         body.put("variables", ctx.variables() != null ? ctx.variables() : Collections.emptyMap());
+        // 4.3 — idempotency-key: viaja en el body + header para que el receptor deduplique
+        // (at-least-once + receptor idempotente = exactly-once). Estable entre los retries.
+        String idemKey = ctx.idempotencyKey() != null ? ctx.idempotencyKey() : java.util.UUID.randomUUID().toString();
+        body.put("idempotencyKey", idemKey);
 
         try {
             Map<String, Object> respBody = http.post()
                 .uri(baseUrl + "/v1/service-tasks/execute")
                 .headers(h -> {
                     h.setContentType(MediaType.APPLICATION_JSON);
+                    h.set("Idempotency-Key", idemKey);
                     if (ctx.bearerToken() != null) {
                         h.set(HttpHeaders.AUTHORIZATION, "Bearer " + ctx.bearerToken());
                     }

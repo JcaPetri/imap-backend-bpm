@@ -45,7 +45,8 @@ public record ServiceTaskContext(
     TokenEntity token,
     UUID userId,
     String bearerToken,
-    Map<String, Object> variables
+    Map<String, Object> variables,
+    String idempotencyKey   // 4.3 — estable entre los retries internos; el receptor deduplica
 ) {
     /** Helper: lee un config del flowElement.config (puede ser null). */
     public Object config(String key) {
