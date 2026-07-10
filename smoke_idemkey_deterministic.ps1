@@ -41,7 +41,7 @@ OKMsg 'logged in'
 $run=(Get-Date).ToString('yyyyMMddHHmmss'); $script:createdPdIds=@(); $script:startedInstances=@()
 function Get-Instance($id){ return Invoke-RestMethod -Uri "$bpm/v1/bpm/instance/$id" -Headers $H }
 function Invoked-Keys($inst){
-    return @($inst.auditLog | Where-Object { $_.eventType -eq 'service_task.invoked' } | ForEach-Object { [string]$_.data.idempotencyKey })
+    return ,@($inst.auditLog | Where-Object { $_.eventType -eq 'service_task.invoked' } | ForEach-Object { [string]$_.data.idempotencyKey })
 }
 function Open-Incidents($iid){
     $all=Invoke-RestMethod -Uri "$bpm/v1/bpm/incidents?lifecycle=open" -Headers $H
@@ -83,9 +83,9 @@ Start-Sleep -Milliseconds 600
 $b=Get-Instance $ia.id
 $keys2=Invoked-Keys $b
 if ($keys2.Count -ge 2) { OKMsg "B: service_task re-invocado ($($keys2.Count) invokes)" } else { Fail "B: invokes=$($keys2.Count), esperaba >=2" }
-$key2=$keys2[1]
+$key2=@($keys2 | Where-Object { $_ -ne $key1 })[0]   # la key que NO es la original = la del retry
 if ($key2 -match $uuidRe) { OKMsg "B: key del retry formato UUID ($($key2.Substring(0,8))...)" } else { Fail "B: key retry mal formada ('$key2')" }
-if ($key1 -ne $key2) { OKMsg 'B: key del retry DISTINTA a la original (encarnacion fresca -> el receptor NO dedupea el retry)' } else { Fail 'B: la key del retry es IGUAL -> el receptor lo dedupearia (retry no re-ejecutaria!)' }
+if ($key1 -and $key2 -and $key1 -ne $key2) { OKMsg 'B: key del retry DISTINTA a la original (encarnacion fresca -> el receptor NO dedupea el retry)' } else { Fail 'B: la key del retry es IGUAL -> el receptor lo dedupearia (retry no re-ejecutaria!)' }
 
 Step 5 'Cleanup'
 foreach ($iid in $startedInstances){ try { Invoke-RestMethod -Uri "$bpm/v1/bpm/instance/$iid`?force=true" -Method DELETE -Headers $H | Out-Null } catch {} }
