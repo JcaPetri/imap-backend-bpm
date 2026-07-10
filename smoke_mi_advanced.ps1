@@ -37,8 +37,8 @@ OKMsg 'logged in'
 $run=(Get-Date).ToString('yyyyMMddHHmmss'); $createdPdIds=@(); $startedInstances=@()
 function Get-Instance($id){ return Invoke-RestMethod -Uri "$bpm/v1/bpm/instance/$id" -Headers $H }
 function Count-Audit($inst,$evt){ return (@($inst.auditLog | Where-Object { $_.eventType -eq $evt })).Count }
-function Active-Reviews($inst){ return @($inst.tasks | Where-Object { $_.flowElementCode -eq 'review' -and ($_.lifecycle -eq 'created' -or $_.lifecycle -eq 'assigned' -or $_.lifecycle -eq 'in_progress') }) }
-function Cancelled-Reviews($inst){ return @($inst.tasks | Where-Object { $_.flowElementCode -eq 'review' -and $_.lifecycle -eq 'cancelled' }) }
+function Active-Reviews($inst){ return ,@($inst.tasks | Where-Object { $_.flowElementCode -eq 'review' -and ($_.lifecycle -eq 'created' -or $_.lifecycle -eq 'assigned' -or $_.lifecycle -eq 'in_progress') }) }
+function Cancelled-Reviews($inst){ return ,@($inst.tasks | Where-Object { $_.flowElementCode -eq 'review' -and $_.lifecycle -eq 'cancelled' }) }
 function Complete-Task($taskId,$body){ Invoke-RestMethod -Uri "$bpm/v1/bpm/task/$taskId/complete" -Method POST -Headers $H -Body ($body|ConvertTo-Json) | Out-Null }
 function New-MiPd($code,$mode,$cc){
     $miCfg=@{ collection='${items}'; elementVar='line'; mode=$mode }
