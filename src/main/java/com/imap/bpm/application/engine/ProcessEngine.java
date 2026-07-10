@@ -1084,13 +1084,104 @@ public class ProcessEngine {
             // Si fire-and-forget (parentTokenId=null) solo auditamos en el
             // parent sin avanzar nada — el parent ya pasó al siguiente flow_element.
             if (instance.getParentInstanceId() != null) {
-                if (instance.getParentTokenId() != null) {
+                // Ola 5 — error/escalation end event dentro de un sub_process:
+                // si el end lleva config.error.errorCode / config.escalation.escalationCode
+                // y el sub_process del parent tiene un boundary error/escalation que
+                // matchea, se PROPAGA (dispara el boundary del parent) en vez de la
+                // completación normal. Si no hay boundary matching (o es no-interrupting)
+                // cae al notify normal.
+                String propCode = errorOrEscalationCode(endEvent);
+                if (propCode != null && instance.getParentTokenId() != null
+                        && propagateSubprocessError(instance, propCode, endEvent, userId)) {
+                    // interrumpido: el parent token fue consumido y ruteado al boundary.
+                } else if (instance.getParentTokenId() != null) {
                     notifyParentOfSubprocessCompletion(instance, userId);
                 } else {
                     auditFireAndForgetChildCompletion(instance, userId);
                 }
             }
         }
+    }
+
+    /**
+     * Ola 5 — extrae el code de un end_event de error o escalation:
+     *   config.error.errorCode      → error (interrumpe por default)
+     *   config.escalation.escalationCode → escalation (puede ser no-interrupting)
+     * Ambos matchean contra findErrorBoundariesFor (exact O catch-all `*`/null).
+     */
+    private String errorOrEscalationCode(ProcessDefinition.FlowElement el) {
+        if (el == null || el.config() == null) return null;
+        Object err = el.config().get("error");
+        if (err instanceof Map<?, ?> m && m.get("errorCode") != null) return String.valueOf(m.get("errorCode"));
+        Object esc = el.config().get("escalation");
+        if (esc instanceof Map<?, ?> m && m.get("escalationCode") != null) return String.valueOf(m.get("escalationCode"));
+        return null;
+    }
+
+    /**
+     * Ola 5 — propaga un error/escalation de un child sub_process al parent: busca
+     * boundary error/escalation adjunto al sub_process del parent que matchee el
+     * code y lo dispara (mismo mecanismo que tryFireServiceTaskBoundaryError pero
+     * cruzando el borde child→parent). Interrumpe el sub_process del parent y lo
+     * rutea a la rama de excepción.
+     *
+     * @return true si disparó ≥1 boundary INTERRUPTING (el parent token quedó
+     *         consumido/ruteado → el caller NO debe hacer notify normal). Si solo
+     *         disparó boundaries no-interrupting (escalation paralela) devuelve
+     *         false para que el caller avance el token principal normalmente.
+     */
+    private boolean propagateSubprocessError(ProcessInstanceEntity child, String errorCode,
+                                              ProcessDefinition.FlowElement errorEnd, UUID userId) {
+        ProcessInstanceEntity parent = instanceRepo.findById(child.getParentInstanceId()).orElse(null);
+        if (parent == null || !"active".equals(parent.getLifecycle())) return false;
+        TokenEntity parentToken = tokenRepo.findById(child.getParentTokenId()).orElse(null);
+        if (parentToken == null || !"waiting".equals(parentToken.getLifecycle())) return false;
+
+        ProcessDefinition parentDef = loader.load(parent.getProcessversionId(), null, parent.getTenantId());
+        ProcessDefinition.FlowElement subProcessElement = parentDef.findElementById(parentToken.getCurrentElementId());
+        if (subProcessElement == null) return false;
+
+        List<ProcessDefinition.FlowElement> matches = parentDef.findErrorBoundariesFor(subProcessElement.code(), errorCode);
+        if (matches.isEmpty()) {
+            log.info("subprocess child {} error '{}' — parent sub_process '{}' sin boundary matching → notify normal",
+                child.getId(), errorCode, subProcessElement.code());
+            return false;
+        }
+
+        boolean isEscalation = errorEnd.config() != null && errorEnd.config().get("escalation") instanceof Map;
+        boolean anyInterrupting = false;
+        int fired = 0;
+        for (ProcessDefinition.FlowElement boundary : matches) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> boundaryCfg = boundary.config() == null ? Map.of()
+                : (Map<String, Object>) boundary.config().getOrDefault("boundary", Map.of());
+            boolean interrupting = !(Boolean.FALSE.equals(boundaryCfg.get("interrupting")));
+            if (interrupting) anyInterrupting = true;
+
+            Map<String, Object> extra = new LinkedHashMap<>();
+            extra.put("trigger", isEscalation ? "escalation" : "error");
+            extra.put("errorCode", errorCode);
+            extra.put("source", "sub_process");
+            extra.put("childInstanceId", child.getId().toString());
+
+            fireBoundaryHandler(parent, parentToken,
+                boundary.id(), boundary.code(),
+                subProcessElement.code(), null,
+                interrupting, null,
+                "boundary.error.fired", "subprocess_error:" + errorCode,
+                extra);
+            fired++;
+        }
+        audit(parent, "subprocess.error.propagated", subProcessElement.id(), parentToken.getId(), userId, Map.of(
+            "errorCode", errorCode,
+            "kind", isEscalation ? "escalation" : "error",
+            "childInstanceId", child.getId().toString(),
+            "boundariesFired", fired,
+            "interrupting", anyInterrupting));
+        metricInc("bpm.subprocess.error_propagated", parentDef);
+        log.info("subprocess child {} error '{}' → propagó {} boundary(ies) al parent {} (interrupting={})",
+            child.getId(), errorCode, fired, parent.getId(), anyInterrupting);
+        return anyInterrupting;
     }
 
     /**
@@ -2004,6 +2095,13 @@ public class ProcessEngine {
                                           ProcessDefinition.FlowElement event,
                                           ProcessDefinition def, UUID userId) {
         Map<String, Object> cfg = event.config();
+        // Ola 5 — THROW: intermediate_event con config.throw="signal"|"compensate"
+        // lanza el evento (broadcast/rollback) y AVANZA (no espera). Distinto de los
+        // catch (timer/message/signal) que ponen el token en waiting.
+        if (cfg != null && cfg.get("throw") instanceof String throwType) {
+            handleThrowEvent(instance, token, event, throwType, def, userId);
+            return;
+        }
         if (cfg != null && cfg.get("timer") instanceof Map) {
             handleTimerEvent(instance, token, event, (Map<String, Object>) cfg.get("timer"), userId);
             return;
@@ -2021,6 +2119,54 @@ public class ProcessEngine {
             event.code());
         audit(instance, "intermediate_event.passthrough", event.id(), token.getId(), userId,
             Map.of("elementCode", event.code()));
+        consumeAndMoveToNext(instance, token, event, def, userId);
+    }
+
+    /**
+     * Ola 5 — THROW intermediate event. A diferencia de los catch (que ponen el
+     * token en waiting hasta la correlación), un throw LANZA el evento y avanza:
+     *   • signal     → broadcastSignal(config.signalCode, vars) — despierta a los
+     *                  catch armados (mismo tenant), inter-proceso. Reusa el motor
+     *                  de correlación de señales.
+     *   • compensate → compensateInstance(...) — corre la compensación LIFO de lo
+     *                  ya completado sin terminar la instance (a diferencia del
+     *                  end_event compensate=true). Permite "deshacer hasta acá y
+     *                  seguir por otra rama".
+     * Message-throw se difiere (necesita la plumbing de message-start del receptor).
+     */
+    private void handleThrowEvent(ProcessInstanceEntity instance, TokenEntity token,
+                                   ProcessDefinition.FlowElement event, String throwType,
+                                   ProcessDefinition def, UUID userId) {
+        Map<String, Object> cfg = event.config();
+        switch (throwType == null ? "" : throwType) {
+            case "signal" -> {
+                String signalCode = cfg != null && cfg.get("signalCode") != null
+                    ? String.valueOf(cfg.get("signalCode")) : null;
+                int reactivated = signalCode == null ? 0
+                    : broadcastSignal(signalCode, currentVariablesAsMap(instance));
+                audit(instance, "signal.thrown", event.id(), token.getId(), userId, Map.of(
+                    "elementCode", event.code(),
+                    "signalCode", signalCode == null ? "(none)" : signalCode,
+                    "reactivated", reactivated));
+                metricInc("bpm.signal.thrown", def);
+                log.info("intermediate throw '{}' broadcast signal '{}' → {} listener(s)",
+                    event.code(), signalCode, reactivated);
+            }
+            case "compensate" -> {
+                compensateInstance(instance, userId);
+                audit(instance, "compensate.thrown", event.id(), token.getId(), userId,
+                    Map.of("elementCode", event.code()));
+                metricInc("bpm.compensate.thrown", def);
+                log.info("intermediate throw '{}' disparó compensación LIFO", event.code());
+            }
+            default -> {
+                log.warn("intermediate throw '{}' tipo '{}' no soportado — passthrough",
+                    event.code(), throwType);
+                audit(instance, "intermediate_event.throw_unsupported", event.id(), token.getId(), userId,
+                    Map.of("elementCode", event.code(), "throwType", String.valueOf(throwType)));
+            }
+        }
+        // Throw = evento de flujo: siempre avanza al siguiente flow_element.
         consumeAndMoveToNext(instance, token, event, def, userId);
     }
 
