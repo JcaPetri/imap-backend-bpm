@@ -90,7 +90,7 @@ $ib=Start-Inst $pdB.processversionId @{ go=$true }
 Start-Sleep -Milliseconds 700
 $b=Get-Instance $ib.id
 $jcB=First-Audit $b 'inclusive.join.completed'
-if ($jcB -and $jcB.data.mode -eq 'reachability') { OKMsg 'B: join completado mode=reachability (no deadlock)' } else { Fail "B: mode inesperado ($($jcB.data.mode)) — sin el fix esto deadlockeaba" }
+if ($jcB -and $jcB.data.mode -eq 'reachability') { OKMsg 'B: join completado mode=reachability (no deadlock)' } else { Fail "B: mode inesperado ($($jcB.data.mode)) - sin el fix esto deadlockeaba" }
 if ($jcB -and [int]$jcB.data.branchesJoined -eq 1) { OKMsg 'B: unio 1 rama (la unica que llego)' } else { Fail "B: branchesJoined=$($jcB.data.branchesJoined), esperaba 1" }
 if ($b.lifecycle -eq 'completed') { OKMsg 'B: instance completed (reachability evito el deadlock)' } else { Fail "B: lifecycle=$($b.lifecycle), esperaba completed" }
 
