@@ -37,7 +37,7 @@ $run=(Get-Date).ToString('yyyyMMddHHmmss'); $script:createdPdIds=@(); $script:st
 $msg="MSGSTART_$run"
 function New-Pd($body){ $pd=Invoke-RestMethod -Uri "$bpm/v1/bpm/admin/processdef" -Method POST -Headers $H -Body ($body|ConvertTo-Json -Depth 14); $script:createdPdIds+=$pd.processdefId; return $pd }
 
-Step 2 "Crear processdef message-start (message '$msg') — SIN arrancarlo a mano"
+Step 2 "Crear processdef message-start (message '$msg') - SIN arrancarlo a mano"
 $pd=New-Pd @{
     header=@{ code="msgstart_$run"; name='Msg start activation'; description='tmp'; lifecycle='active' }
     flowElements=@(
@@ -50,7 +50,7 @@ $pd=New-Pd @{
         @{ sourceCode='svc';   targetCode='end'; sortOrder=2 }
     )
 }
-OKMsg "processdef creado (ver=$($pd.processversionId)) — NO se arranco manualmente"
+OKMsg "processdef creado (ver=$($pd.processversionId)) - NO se arranco manualmente"
 
 Step 3 "Mandar el mensaje -> debe arrancar (sync en activacion)"
 $r=Invoke-RestMethod -Uri "$bpm/v1/bpm/messages/start" -Method POST -Headers $H -Body (@{ messageCode=$msg; variables=@{ message='hi' } }|ConvertTo-Json)
