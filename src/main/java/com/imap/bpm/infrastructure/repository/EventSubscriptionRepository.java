@@ -24,9 +24,13 @@ import java.util.UUID;
 
 public interface EventSubscriptionRepository extends JpaRepository<EventSubscriptionEntity, UUID> {
 
-    /** Suscripciones activas que matchean un evento (dispatch del trigger). */
+    /** Suscripciones activas que matchean un evento BROADCAST (signal) — tenant-wide. */
     List<EventSubscriptionEntity> findByTenantIdAndTriggerTypeAndTriggerCodeAndLifecycle(
         UUID tenantId, String triggerType, String triggerCode, String lifecycle);
+
+    /** Suscripciones activas de UNA instancia por tipo — para eventos instance-local (error). */
+    List<EventSubscriptionEntity> findByProcessinstanceIdAndTriggerTypeAndLifecycle(
+        UUID processinstanceId, String triggerType, String lifecycle);
 
     /** Para cascade DELETE de instance (admin cleanup). */
     long deleteByProcessinstanceId(UUID processinstanceId);

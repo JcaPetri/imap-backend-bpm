@@ -761,6 +761,15 @@ public class ProcessEngine {
             effectiveErrorCode, userId);
         if (fired) return;
 
+        // Ola 6.1 — event_sub_process de ERROR a nivel scope: si la instancia tiene uno
+        // suscripto (exact/catch-all), lo dispara (interrumpe + corre handler) en vez de
+        // dejar el token failed + abrir incidente. cancelLiveTokens ya consume este token.
+        if (tryFireErrorEventSubprocess(instance, effectiveErrorCode, userId)) {
+            log.info("service_task '{}' error '{}' → manejado por event_sub_process de error (sin incidente)",
+                current.code(), effectiveErrorCode);
+            return;
+        }
+
         // ── FAILURE definitivo (sin boundary matching) ───────────────────────
         token.setLifecycle("failed");
         token.setUpdatedAt(OffsetDateTime.now());
@@ -1391,6 +1400,36 @@ public class ProcessEngine {
             if (fireEventSubprocess(sub, payload, userId)) fired++;
         }
         return fired;
+    }
+
+    /**
+     * Ola 6.1 — event_sub_process de ERROR a nivel scope de instancia: cuando un service_task
+     * falla terminal SIN boundary error que lo capture, si la instancia tiene un event_sub_process
+     * suscripto a 'error' (matcheando el errorCode exacto o catch-all '*'), lo dispara en vez de
+     * abrir un incidente. Distinto del boundary error (que es por-activity): esto captura errores
+     * de CUALQUIER activity del scope. Instance-local (no broadcast). @return true si disparó.
+     */
+    private boolean tryFireErrorEventSubprocess(ProcessInstanceEntity instance, String errorCode, UUID userId) {
+        List<EventSubscriptionEntity> subs = eventSubRepo
+            .findByProcessinstanceIdAndTriggerTypeAndLifecycle(instance.getId(), "error", "active");
+        if (subs.isEmpty()) return false;
+        Map<String, Object> payload = new LinkedHashMap<>();
+        if (errorCode != null) payload.put("errorCode", errorCode);
+        // exact match primero; si ninguno, catch-all '*'.
+        int fired = 0;
+        for (EventSubscriptionEntity sub : subs) {
+            if (errorCode != null && errorCode.equals(sub.getTriggerCode())) {
+                if (fireEventSubprocess(sub, payload, userId)) fired++;
+            }
+        }
+        if (fired == 0) {
+            for (EventSubscriptionEntity sub : subs) {
+                if ("*".equals(sub.getTriggerCode())) {
+                    if (fireEventSubprocess(sub, payload, userId)) fired++;
+                }
+            }
+        }
+        return fired > 0;
     }
 
     /**
