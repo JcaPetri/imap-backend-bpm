@@ -63,6 +63,9 @@ public class DecisiondefEntity {
     @Column(name = "hit_policy", length = 20)
     private String hitPolicy;
 
+    @Column(name = "required_decisions")
+    private String requiredDecisions;   // JSON array de codes (DRD chaining, Ola 7.1)
+
     @Column(name = "state_id", nullable = false)
     private UUID stateId;
 
@@ -97,6 +100,8 @@ public class DecisiondefEntity {
     public void setOutputSchema(String outputSchema) { this.outputSchema = outputSchema; }
     public String getHitPolicy() { return hitPolicy; }
     public void setHitPolicy(String hitPolicy) { this.hitPolicy = hitPolicy; }
+    public String getRequiredDecisions() { return requiredDecisions; }
+    public void setRequiredDecisions(String requiredDecisions) { this.requiredDecisions = requiredDecisions; }
     public UUID getStateId() { return stateId; }
     public void setStateId(UUID stateId) { this.stateId = stateId; }
     public OffsetDateTime getCreatedAt() { return createdAt; }

@@ -3369,18 +3369,23 @@ public class ProcessEngine {
         }
 
         Map<String, Object> inputs = currentVariablesAsMap(instance);
+        // Ola 7.1 — DRD chaining: evalua las dependencias (requiredDecisions) en orden
+        // topologico ANTES, inyectando sus outputs como inputs, y luego la decision top.
+        List<String> drdChain = new ArrayList<>();
         DmnEvaluator.EvaluationResult result;
         try {
-            result = dmnEvaluator.evaluate(decision, inputs);
+            result = evaluateDecisionDrd(decisionRef, inputs, instance.getTenantId(),
+                new HashSet<>(), new ArrayDeque<>(), drdChain);
         } catch (IllegalStateException e) {
-            // Hit policy violation (ej unique matcheó >1)
-            log.error("business_rule_task '{}': decision evaluation failed: {}",
+            // Hit policy violation (unique >1), ciclo DRD, o dependencia no encontrada.
+            log.error("business_rule_task '{}': DRD/decision evaluation failed: {}",
                 brt.code(), e.getMessage());
             audit(instance, "decision.error", brt.id(), token.getId(), userId, Map.of(
                 "elementCode", brt.code(),
                 "decisionRef", decisionRef,
-                "hitPolicy", decision.hitPolicy(),
-                "error", e.getMessage()
+                "hitPolicy", decision.hitPolicy() == null ? "?" : decision.hitPolicy(),
+                "drdChain", drdChain,
+                "error", e.getMessage() == null ? "?" : e.getMessage()
             ));
             token.setLifecycle("waiting");
             tokenRepo.save(token);
@@ -3417,6 +3422,7 @@ public class ProcessEngine {
         auditData.put("totalMatched", result.totalMatched());
         auditData.put("inputs", inputs);
         auditData.put("outputs", result.outputs());
+        auditData.put("drdChain", drdChain);   // decisiones evaluadas (deps primero, top al final)
         audit(instance, "decision.evaluated", brt.id(), token.getId(), userId, auditData);
         log.info("business_rule_task '{}' decision '{}' → totalMatched={} outputs={}",
             brt.code(), decisionRef, result.totalMatched(), result.outputs());
@@ -3424,6 +3430,40 @@ public class ProcessEngine {
             Tags.of("decision", decisionRef)).increment();
 
         consumeAndMoveToNext(instance, token, brt, def, userId);
+    }
+
+    /**
+     * Ola 7.1 — evalúa una decision resolviendo su DRD (Decision Requirements Diagram):
+     * primero (recursivo, orden topológico) las `requiredDecisions`, inyectando sus outputs
+     * en `workingInputs`, y luego la decision `decisionCode`. Detecta ciclos vía `stack` y
+     * memoiza las ya evaluadas vía `evaluated` (una dep compartida no se re-evalúa). `chain`
+     * acumula el orden real de evaluación (deps primero, top al final) para auditoría.
+     * @return el EvaluationResult de la decision TOP (`decisionCode`).
+     */
+    private DmnEvaluator.EvaluationResult evaluateDecisionDrd(
+            String decisionCode, Map<String, Object> workingInputs, UUID tenantId,
+            Set<String> evaluated, Deque<String> stack, List<String> chain) {
+        if (stack.contains(decisionCode)) {
+            throw new IllegalStateException("DRD cycle detected at '" + decisionCode
+                + "' (stack: " + stack + ")");
+        }
+        stack.push(decisionCode);
+        DecisionDefinition def = decisionLoader.load(decisionCode, null, tenantId);
+        if (def.requiredDecisions() != null) {
+            for (String req : def.requiredDecisions()) {
+                if (req == null || req.isBlank() || evaluated.contains(req)) continue;
+                DmnEvaluator.EvaluationResult depResult =
+                    evaluateDecisionDrd(req, workingInputs, tenantId, evaluated, stack, chain);
+                if (depResult != null && depResult.outputs() != null) {
+                    workingInputs.putAll(depResult.outputs());   // outputs de la dep → inputs downstream
+                }
+                evaluated.add(req);
+            }
+        }
+        stack.pop();
+        DmnEvaluator.EvaluationResult result = dmnEvaluator.evaluate(def, workingInputs);
+        chain.add(decisionCode);
+        return result;
     }
 
     /**
