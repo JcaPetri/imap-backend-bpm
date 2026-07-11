@@ -23,10 +23,10 @@ import com.imap.bpm.application.engine.DecisionDefinitionLoader;
 import com.imap.bpm.domain.dto.CreateProcessdefRequest;
 import com.imap.bpm.domain.dto.CreateProcessdefResponse;
 import com.imap.bpm.infrastructure.entity.DecisiondefEntity;
-import com.imap.bpm.infrastructure.entity.DmnRuleEntity;
 import com.imap.bpm.infrastructure.repository.DecisiondefRepository;
 import com.imap.bpm.infrastructure.repository.DmnRuleRepository;
 import com.imap.eav.engine.context.EavTenantSession;
+import org.springframework.jdbc.core.JdbcTemplate;
 import com.imap.platform.security.UserContext;
 import com.imap.platform.security.UserContextHolder;
 import com.imap.platform.tenant.TenantContextHolder;
@@ -74,19 +74,22 @@ public class ProcessdefAdminController {
     private final DmnRuleRepository dmnRuleRepo;
     private final DecisionDefinitionLoader decisionLoader;
     private final ObjectMapper jackson;
+    private final JdbcTemplate jdbc;
 
     public ProcessdefAdminController(ProcessdefManagementService service,
                                      EavTenantSession tenantSession,
                                      DecisiondefRepository decisiondefRepo,
                                      DmnRuleRepository dmnRuleRepo,
                                      DecisionDefinitionLoader decisionLoader,
-                                     ObjectMapper jackson) {
+                                     ObjectMapper jackson,
+                                     JdbcTemplate jdbc) {
         this.service = service;
         this.tenantSession = tenantSession;
         this.decisiondefRepo = decisiondefRepo;
         this.dmnRuleRepo = dmnRuleRepo;
         this.decisionLoader = decisionLoader;
         this.jackson = jackson;
+        this.jdbc = jdbc;
     }
 
     // ── DMN decision authoring (Ola 7.1 — antes solo via SQL directo) ───────────
@@ -106,22 +109,19 @@ public class ProcessdefAdminController {
         if (code == null || code.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "code is required"));
         }
-        OffsetDateTime now = OffsetDateTime.now();
 
-        DecisiondefEntity dd = new DecisiondefEntity();
-        dd.setId(UUID.randomUUID());
-        dd.setTenantId(tenantId);
-        dd.setCode(code);
-        dd.setName(str(body.get("name"), code));
-        dd.setDescription(str(body.get("description"), null));
-        dd.setHitPolicy(str(body.get("hitPolicy"), "first"));
-        dd.setInputSchema(toJson(body.get("inputSchema")));
-        dd.setOutputSchema(toJson(body.get("outputSchema")));
-        dd.setRequiredDecisions(toJson(body.get("requiredDecisions")));
-        dd.setStateId(DEFAULT_STATE_ACTIVE);
-        dd.setCreatedAt(now);
-        dd.setUpdatedAt(now);
-        decisiondefRepo.save(dd);
+        // JdbcTemplate + CAST(? AS jsonb): las columnas JSON no aceptan bind de varchar
+        // (Hibernate bindea String→varchar). Los by-id del núcleo audit-7 los llena el
+        // trigger fn_fill_nucleo; created_at/updated_at tienen DEFAULT now().
+        UUID ddId = UUID.randomUUID();
+        jdbc.update(
+            "INSERT INTO bpm.bpm_dmn_decisiondef_tbl " +
+            "(id, tenant_id, code, name, description, hit_policy, input_schema, output_schema, required_decisions, state_id) " +
+            "VALUES (?, ?, ?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb), CAST(? AS jsonb), ?)",
+            ddId, tenantId, code, str(body.get("name"), code), str(body.get("description"), null),
+            str(body.get("hitPolicy"), "first"),
+            toJson(body.get("inputSchema")), toJson(body.get("outputSchema")), toJson(body.get("requiredDecisions")),
+            DEFAULT_STATE_ACTIVE);
 
         int ruleCount = 0;
         if (body.get("rules") instanceof List<?> rules) {
@@ -129,19 +129,15 @@ public class ProcessdefAdminController {
             for (Object rObj : rules) {
                 if (!(rObj instanceof Map)) continue;
                 Map<String, Object> r = (Map<String, Object>) rObj;
-                DmnRuleEntity rule = new DmnRuleEntity();
-                rule.setId(UUID.randomUUID());
-                rule.setTenantId(tenantId);
-                rule.setDecisiondefId(dd.getId());
                 Object p = r.get("priority");
-                rule.setPriority(p instanceof Number n ? n.intValue() : prio);
-                rule.setInputs(toJson(r.get("inputs")));
-                rule.setOutputs(toJson(r.get("outputs")));
-                rule.setDescription(str(r.get("description"), null));
-                rule.setStateId(DEFAULT_STATE_ACTIVE);
-                rule.setCreatedAt(now);
-                rule.setUpdatedAt(now);
-                dmnRuleRepo.save(rule);
+                int priority = p instanceof Number n ? n.intValue() : prio;
+                jdbc.update(
+                    "INSERT INTO bpm.bpm_dmn_rule_tbl " +
+                    "(id, tenant_id, decisiondef_id, priority, inputs, outputs, description, state_id) " +
+                    "VALUES (?, ?, ?, ?, CAST(? AS jsonb), CAST(? AS jsonb), ?, ?)",
+                    UUID.randomUUID(), tenantId, ddId, priority,
+                    toJson(r.get("inputs")), toJson(r.get("outputs")), str(r.get("description"), null),
+                    DEFAULT_STATE_ACTIVE);
                 ruleCount++;
                 prio++;
             }
@@ -149,7 +145,7 @@ public class ProcessdefAdminController {
         decisionLoader.invalidate(code);   // por si estaba cacheada
         log.info("createDecision '{}' (rules={}, requiredDecisions={})", code, ruleCount, body.get("requiredDecisions"));
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("id", dd.getId().toString());
+        out.put("id", ddId.toString());
         out.put("code", code);
         out.put("rules", ruleCount);
         return ResponseEntity.ok(out);
