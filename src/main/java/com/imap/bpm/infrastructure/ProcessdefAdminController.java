@@ -20,6 +20,7 @@ package com.imap.bpm.infrastructure;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.application.ProcessdefManagementService;
 import com.imap.bpm.application.engine.DecisionDefinitionLoader;
+import com.imap.bpm.application.engine.ProcessDefinitionLoader;
 import com.imap.bpm.domain.dto.CreateProcessdefRequest;
 import com.imap.bpm.domain.dto.CreateProcessdefResponse;
 import com.imap.bpm.infrastructure.entity.DecisiondefEntity;
@@ -75,6 +76,7 @@ public class ProcessdefAdminController {
     private final DecisionDefinitionLoader decisionLoader;
     private final ObjectMapper jackson;
     private final JdbcTemplate jdbc;
+    private final ProcessDefinitionLoader processLoader;
 
     public ProcessdefAdminController(ProcessdefManagementService service,
                                      EavTenantSession tenantSession,
@@ -82,7 +84,8 @@ public class ProcessdefAdminController {
                                      DmnRuleRepository dmnRuleRepo,
                                      DecisionDefinitionLoader decisionLoader,
                                      ObjectMapper jackson,
-                                     JdbcTemplate jdbc) {
+                                     JdbcTemplate jdbc,
+                                     ProcessDefinitionLoader processLoader) {
         this.service = service;
         this.tenantSession = tenantSession;
         this.decisiondefRepo = decisiondefRepo;
@@ -90,6 +93,24 @@ public class ProcessdefAdminController {
         this.decisionLoader = decisionLoader;
         this.jackson = jackson;
         this.jdbc = jdbc;
+        this.processLoader = processLoader;
+    }
+
+    /**
+     * Chip task_9de0cde9 — al ACTIVAR una versión (create/update/publish), sincroniza
+     * ya sus subscripciones message-start para el tenant, en vez de esperar al primer
+     * `load()` lazy (que solo pasaba en el primer start manual). Reusa el path de sync:
+     * `load()` lee la def recién escrita (misma tx) y `syncMessageStartSubscriptions`
+     * la registra para este tenant. Atómico con la creación; también deja la def cacheada.
+     * No-op si la versión no quedó activa (processversionId null = dryRun/draft).
+     */
+    private void syncMessageStartOnActivation(CreateProcessdefResponse resp, UUID tenantId) {
+        if (resp == null || resp.processversionId() == null) return;
+        // invalidate primero: un update reusa el mismo processVersionId; sin esto el
+        // load() daría cache-HIT y saltearía el sync (y serviría la def vieja). En
+        // create/publish el pvId es nuevo → invalidate es no-op.
+        processLoader.invalidate(resp.processversionId());
+        processLoader.load(resp.processversionId(), null, tenantId);
     }
 
     // ── DMN decision authoring (Ola 7.1 — antes solo via SQL directo) ───────────
@@ -184,6 +205,7 @@ public class ProcessdefAdminController {
         UserContext user = UserContextHolder.get();
         UUID userId = user != null ? user.userId() : null;
         CreateProcessdefResponse resp = service.create(req, tenantId, userId);
+        syncMessageStartOnActivation(resp, tenantId);
         return ResponseEntity.ok(resp);
     }
 
@@ -226,6 +248,7 @@ public class ProcessdefAdminController {
         UUID userId = user != null ? user.userId() : null;
         try {
             CreateProcessdefResponse resp = service.update(UUID.fromString(id), req, tenantId, userId);
+            syncMessageStartOnActivation(resp, tenantId);
             return ResponseEntity.ok(resp);
         } catch (IllegalArgumentException ex) {
             if (isNotFound(ex)) return ResponseEntity.notFound().build();
@@ -265,6 +288,7 @@ public class ProcessdefAdminController {
         UUID userId = user != null ? user.userId() : null;
         try {
             CreateProcessdefResponse resp = service.publishNewVersion(UUID.fromString(id), req, tenantId, userId);
+            syncMessageStartOnActivation(resp, tenantId);
             return ResponseEntity.ok(resp);
         } catch (IllegalArgumentException ex) {
             if (isNotFound(ex)) return ResponseEntity.notFound().build();
