@@ -67,6 +67,11 @@ Cross-cutting: cache de definiciones (Caffeine), timers multi-réplica (`FOR UPD
 (`BpmServiceTokenProvider`), notificaciones live por SSE, migración de instancias entre versiones, y WorkHub
 (priorización + semáforo de tareas).
 
+**Expresiones**: condiciones de gateway y evaluación DMN usan **Apache Commons JEXL3** (`${var == 'x'}`), no FEEL.
+FEEL (el lenguaje de expresiones estándar de Camunda/DMN) está **diferido por decisión explícita** (2026-07-11):
+solo se implementaría si aparece la necesidad de **importar BPMN/DMN estándar de Camunda Modeler**; JEXL3 cubre
+toda la autoría propia. Ver `IMAP_MOTOR_BPM_PLAN.md §7.2`.
+
 ## Integraciones
 
 Orquesta y habla **por HTTP seguro (S2S con JWT)** con el resto de la plataforma: rutea tareas de servicio a

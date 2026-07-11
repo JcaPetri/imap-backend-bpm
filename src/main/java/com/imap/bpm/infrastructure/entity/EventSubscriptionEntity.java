@@ -60,6 +60,9 @@ public class EventSubscriptionEntity {
     @Column(name = "trigger_code", nullable = false, length = 100)
     private String triggerCode;
 
+    @Column(name = "correlation_key", length = 200)
+    private String correlationKey;    // solo message: rutea el mensaje a la instancia (null/'*' = wildcard)
+
     @Column(name = "handler_version_id", nullable = false)
     private UUID handlerVersionId;
 
@@ -92,6 +95,8 @@ public class EventSubscriptionEntity {
     public void setTriggerType(String s)       { this.triggerType = s; }
     public String getTriggerCode()             { return triggerCode; }
     public void setTriggerCode(String s)       { this.triggerCode = s; }
+    public String getCorrelationKey()          { return correlationKey; }
+    public void setCorrelationKey(String s)    { this.correlationKey = s; }
     public UUID getHandlerVersionId()          { return handlerVersionId; }
     public void setHandlerVersionId(UUID id)   { this.handlerVersionId = id; }
     public boolean isInterrupting()            { return interrupting; }
