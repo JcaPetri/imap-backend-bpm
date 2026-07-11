@@ -24,4 +24,7 @@ import java.util.UUID;
 
 public interface DmnRuleRepository extends JpaRepository<DmnRuleEntity, UUID> {
     List<DmnRuleEntity> findByDecisiondefIdOrderByPriorityAsc(UUID decisiondefId);
+
+    /** Borra las rules de una decision (autoría/cleanup admin, Ola 7.1). */
+    long deleteByDecisiondefId(UUID decisiondefId);
 }

@@ -139,7 +139,18 @@ public class LocalDefinitionReader {
 
         return new DecisionDefinition(
             dd.getId(), dd.getCode(), dd.getName(), dd.getDescription(), dd.getHitPolicy(),
-            parseSchema(dd.getInputSchema()), parseSchema(dd.getOutputSchema()), rules);
+            parseSchema(dd.getInputSchema()), parseSchema(dd.getOutputSchema()), rules,
+            parseStringList(dd.getRequiredDecisions()));
+    }
+
+    /** Parsea un JSON array de strings (required_decisions del DRD). null/blank → vacío. */
+    private List<String> parseStringList(String json) {
+        if (json == null || json.isBlank()) return List.of();
+        try {
+            return mapper.readValue(json, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     // ── parsers JSON (defensivos: null/blank → vacío) ──────────────────────────

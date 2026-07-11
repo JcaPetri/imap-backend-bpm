@@ -17,9 +17,15 @@
 
 package com.imap.bpm.infrastructure;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imap.bpm.application.ProcessdefManagementService;
+import com.imap.bpm.application.engine.DecisionDefinitionLoader;
 import com.imap.bpm.domain.dto.CreateProcessdefRequest;
 import com.imap.bpm.domain.dto.CreateProcessdefResponse;
+import com.imap.bpm.infrastructure.entity.DecisiondefEntity;
+import com.imap.bpm.infrastructure.entity.DmnRuleEntity;
+import com.imap.bpm.infrastructure.repository.DecisiondefRepository;
+import com.imap.bpm.infrastructure.repository.DmnRuleRepository;
 import com.imap.eav.engine.context.EavTenantSession;
 import com.imap.platform.security.UserContext;
 import com.imap.platform.security.UserContextHolder;
@@ -30,6 +36,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -57,14 +65,120 @@ public class ProcessdefAdminController {
 
     private static final Logger log = LoggerFactory.getLogger(ProcessdefAdminController.class);
 
+    private static final UUID DEFAULT_STATE_ACTIVE =
+        UUID.fromString("019dc6f0-aa83-7333-8888-000000000001");
+
     private final ProcessdefManagementService service;
     private final EavTenantSession tenantSession;
+    private final DecisiondefRepository decisiondefRepo;
+    private final DmnRuleRepository dmnRuleRepo;
+    private final DecisionDefinitionLoader decisionLoader;
+    private final ObjectMapper jackson;
 
     public ProcessdefAdminController(ProcessdefManagementService service,
-                                     EavTenantSession tenantSession) {
+                                     EavTenantSession tenantSession,
+                                     DecisiondefRepository decisiondefRepo,
+                                     DmnRuleRepository dmnRuleRepo,
+                                     DecisionDefinitionLoader decisionLoader,
+                                     ObjectMapper jackson) {
         this.service = service;
         this.tenantSession = tenantSession;
+        this.decisiondefRepo = decisiondefRepo;
+        this.dmnRuleRepo = dmnRuleRepo;
+        this.decisionLoader = decisionLoader;
+        this.jackson = jackson;
     }
+
+    // ── DMN decision authoring (Ola 7.1 — antes solo via SQL directo) ───────────
+
+    /**
+     * Crea una decisiondef + sus rules. Body (JSON en formato var_name, tal como lo lee
+     * el LocalDefinitionReader): {code, name, description, hitPolicy, inputSchema[], outputSchema[],
+     * requiredDecisions[], rules:[{priority, inputs[], outputs[], description}]}.
+     */
+    @PostMapping("/decisiondef")
+    @Transactional
+    @SuppressWarnings("unchecked")
+    public ResponseEntity<Map<String, Object>> createDecision(@RequestBody Map<String, Object> body) {
+        tenantSession.applyToCurrentTransaction();
+        UUID tenantId = TenantContextHolder.get();
+        String code = body == null ? null : (String) body.get("code");
+        if (code == null || code.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "code is required"));
+        }
+        OffsetDateTime now = OffsetDateTime.now();
+
+        DecisiondefEntity dd = new DecisiondefEntity();
+        dd.setId(UUID.randomUUID());
+        dd.setTenantId(tenantId);
+        dd.setCode(code);
+        dd.setName(str(body.get("name"), code));
+        dd.setDescription(str(body.get("description"), null));
+        dd.setHitPolicy(str(body.get("hitPolicy"), "first"));
+        dd.setInputSchema(toJson(body.get("inputSchema")));
+        dd.setOutputSchema(toJson(body.get("outputSchema")));
+        dd.setRequiredDecisions(toJson(body.get("requiredDecisions")));
+        dd.setStateId(DEFAULT_STATE_ACTIVE);
+        dd.setCreatedAt(now);
+        dd.setUpdatedAt(now);
+        decisiondefRepo.save(dd);
+
+        int ruleCount = 0;
+        if (body.get("rules") instanceof List<?> rules) {
+            int prio = 1;
+            for (Object rObj : rules) {
+                if (!(rObj instanceof Map)) continue;
+                Map<String, Object> r = (Map<String, Object>) rObj;
+                DmnRuleEntity rule = new DmnRuleEntity();
+                rule.setId(UUID.randomUUID());
+                rule.setTenantId(tenantId);
+                rule.setDecisiondefId(dd.getId());
+                Object p = r.get("priority");
+                rule.setPriority(p instanceof Number n ? n.intValue() : prio);
+                rule.setInputs(toJson(r.get("inputs")));
+                rule.setOutputs(toJson(r.get("outputs")));
+                rule.setDescription(str(r.get("description"), null));
+                rule.setStateId(DEFAULT_STATE_ACTIVE);
+                rule.setCreatedAt(now);
+                rule.setUpdatedAt(now);
+                dmnRuleRepo.save(rule);
+                ruleCount++;
+                prio++;
+            }
+        }
+        decisionLoader.invalidate(code);   // por si estaba cacheada
+        log.info("createDecision '{}' (rules={}, requiredDecisions={})", code, ruleCount, body.get("requiredDecisions"));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", dd.getId().toString());
+        out.put("code", code);
+        out.put("rules", ruleCount);
+        return ResponseEntity.ok(out);
+    }
+
+    /** Borra una decisiondef + sus rules (autoría/cleanup). */
+    @DeleteMapping("/decisiondef/{code}")
+    @Transactional
+    public ResponseEntity<Map<String, Object>> deleteDecision(@PathVariable("code") String code) {
+        tenantSession.applyToCurrentTransaction();
+        UUID tenantId = TenantContextHolder.get();
+        DecisiondefEntity dd = decisiondefRepo.findByTenantIdAndCode(tenantId, code).orElse(null);
+        if (dd == null) return ResponseEntity.notFound().build();
+        long rules = dmnRuleRepo.deleteByDecisiondefId(dd.getId());
+        decisiondefRepo.delete(dd);
+        decisionLoader.invalidate(code);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("code", code);
+        out.put("deleted", true);
+        out.put("rules", rules);
+        return ResponseEntity.ok(out);
+    }
+
+    private String toJson(Object o) {
+        if (o == null) return null;
+        try { return jackson.writeValueAsString(o); } catch (Exception e) { return null; }
+    }
+
+    private static String str(Object o, String def) { return o == null ? def : o.toString(); }
 
     @PostMapping("/processdef")
     @Transactional

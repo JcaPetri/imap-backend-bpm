@@ -35,7 +35,9 @@ public record DecisionDefinition(
     String hitPolicy,
     List<SchemaEntry> inputSchema,
     List<SchemaEntry> outputSchema,
-    List<Rule> rules
+    List<Rule> rules,
+    /** DRD chaining (Ola 7.1): codes de decisiones que hay que evaluar ANTES (sus outputs → inputs). */
+    List<String> requiredDecisions
 ) {
     /** Entrada del schema: nombre de la variable + type ("string", "number", "boolean", "date"). */
     public record SchemaEntry(String varName, String type) {}
