@@ -2241,43 +2241,61 @@ public class ProcessEngine {
             // por si dos ramas async (user_task/timer) llegan concurrentes.
             TokenEntity anchor = myParent == null ? null
                 : tokenRepo.findByIdForUpdate(myParent).orElse(null);
-            int expected = (anchor != null && anchor.getMiCardinality() != null)
-                ? anchor.getMiCardinality() : incoming.size();   // fallback defensivo
+            boolean structured = anchor != null && anchor.getMiCardinality() != null;
 
             List<TokenEntity> arrived = tokenRepo.findByProcessinstanceIdAndCurrentElementIdAndLifecycle(
                 instance.getId(), gateway.id(), "waiting");
-            List<TokenEntity> siblings = arrived.stream()
-                .filter(t -> Objects.equals(t.getParentTokenId(), myParent))
-                .toList();
 
-            if (siblings.size() < expected) {
-                audit(instance, "inclusive.join.progress", gateway.id(), token.getId(), userId,
-                    Map.of("gatewayCode", gateway.code(), "arrived", siblings.size(), "expected", expected));
-                return;   // esperar mas ramas activadas
-            }
-
-            for (TokenEntity sib : siblings) {
-                sib.setLifecycle("consumed");
-                sib.setUpdatedAt(now);
-                tokenRepo.save(sib);
-            }
-            // Consume el ancla (split token) y restaura el nivel de paralelismo previo.
-            UUID grandparent = anchor != null ? anchor.getParentTokenId() : null;
-            if (anchor != null) {
+            List<TokenEntity> toJoin;
+            UUID outputParent;
+            if (structured) {
+                // ── Fast-path ESTRUCTURADO (sin cambios): espera la cardinalidad del split ancla.
+                int expected = anchor.getMiCardinality();
+                List<TokenEntity> siblings = arrived.stream()
+                    .filter(t -> Objects.equals(t.getParentTokenId(), myParent))
+                    .toList();
+                if (siblings.size() < expected) {
+                    audit(instance, "inclusive.join.progress", gateway.id(), token.getId(), userId,
+                        Map.of("gatewayCode", gateway.code(), "arrived", siblings.size(),
+                               "expected", expected, "mode", "structured"));
+                    return;   // esperar mas ramas activadas
+                }
+                toJoin = siblings;
+                outputParent = anchor.getParentTokenId();   // restaura el nivel de paralelismo previo
                 anchor.setLifecycle("consumed");
                 anchor.setMiCardinality(null);
                 anchor.setUpdatedAt(now);
                 tokenRepo.save(anchor);
+                audit(instance, "inclusive.join.completed", gateway.id(), null, userId, Map.of(
+                    "gatewayCode", gateway.code(), "branchesJoined", toJoin.size(),
+                    "expected", expected, "mode", "structured"));
+            } else {
+                // ── FULL-REACHABILITY (6.2): sin ancla de cardinalidad. Completa cuando NINGÚN
+                //    token vivo puede todavía alcanzar este join (dead-path elimination). Reemplaza
+                //    el viejo fallback `incoming.size()` que deadlockeaba topologías no-estructuradas
+                //    (ej. un inclusive join alcanzado desde un exclusive split: solo llega 1 rama de N).
+                Set<UUID> arrivedIds = arrived.stream()
+                    .map(TokenEntity::getId).collect(java.util.stream.Collectors.toSet());
+                if (anyLiveTokenCanReachElement(instance, gateway.id(), def, arrivedIds)) {
+                    audit(instance, "inclusive.join.progress", gateway.id(), token.getId(), userId,
+                        Map.of("gatewayCode", gateway.code(), "arrived", arrived.size(), "mode", "reachability"));
+                    return;   // algún token vivo todavía puede llegar → esperar
+                }
+                toJoin = arrived;        // todos los que llegaron al gateway (cualquier parent)
+                outputParent = null;     // sin ancla → nivel de instancia
+                audit(instance, "inclusive.join.completed", gateway.id(), null, userId, Map.of(
+                    "gatewayCode", gateway.code(), "branchesJoined", toJoin.size(), "mode", "reachability"));
             }
-            audit(instance, "inclusive.join.completed", gateway.id(), null, userId, Map.of(
-                "gatewayCode", gateway.code(),
-                "branchesJoined", siblings.size(),
-                "expected", expected
-            ));
+
+            for (TokenEntity sib : toJoin) {
+                sib.setLifecycle("consumed");
+                sib.setUpdatedAt(now);
+                tokenRepo.save(sib);
+            }
             metricInc("bpm.inclusive.join", def);
 
             ProcessDefinition.SequenceFlow out = outgoing.get(0);
-            TokenEntity outToken = newToken(instance, out.targetId(), grandparent);
+            TokenEntity outToken = newToken(instance, out.targetId(), outputParent);
             tokenRepo.save(outToken);
             ProcessDefinition.FlowElement target = def.findElementById(out.targetId());
             audit(instance, "token.entered", out.targetId(), outToken.getId(), userId, Map.of(
@@ -2301,6 +2319,39 @@ public class ProcessEngine {
         tokenRepo.save(token);
         audit(instance, "gateway.unsupported_shape", gateway.id(), token.getId(), userId, Map.of(
             "gatewayCode", gateway.code(), "incoming", incoming.size(), "outgoing", outgoing.size()));
+    }
+
+    /**
+     * 6.2 — ¿algún token vivo (active/waiting), excluyendo los que ya llegaron al join,
+     * puede TODAVÍA alcanzar `targetElementId` siguiendo sequence flows hacia adelante?
+     * Base del dead-path elimination del inclusive join no-estructurado.
+     */
+    private boolean anyLiveTokenCanReachElement(ProcessInstanceEntity instance, UUID targetElementId,
+                                                ProcessDefinition def, Set<UUID> excludeTokenIds) {
+        List<TokenEntity> live = tokenRepo.findByProcessinstanceIdAndLifecycleIn(
+            instance.getId(), List.of("active", "waiting"));
+        for (TokenEntity t : live) {
+            if (excludeTokenIds.contains(t.getId())) continue;           // ya llegó al join
+            UUID pos = t.getCurrentElementId();
+            if (pos == null || targetElementId.equals(pos)) continue;    // ya está en el join
+            if (canReachElement(pos, targetElementId, def)) return true;
+        }
+        return false;
+    }
+
+    /** BFS hacia adelante sobre sequence flows: ¿es `target` alcanzable desde `from`? */
+    private boolean canReachElement(UUID from, UUID target, ProcessDefinition def) {
+        Set<UUID> visited = new HashSet<>();
+        Deque<UUID> queue = new ArrayDeque<>();
+        queue.add(from); visited.add(from);
+        while (!queue.isEmpty()) {
+            UUID cur = queue.poll();
+            for (ProcessDefinition.SequenceFlow sf : def.outgoingFlows(cur)) {
+                if (target.equals(sf.targetId())) return true;
+                if (visited.add(sf.targetId())) queue.add(sf.targetId());
+            }
+        }
+        return false;
     }
 
     // ════════════════════════════════════════════════════════════════════════
