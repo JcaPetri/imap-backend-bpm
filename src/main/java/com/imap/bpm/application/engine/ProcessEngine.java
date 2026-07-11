@@ -1344,12 +1344,11 @@ public class ProcessEngine {
                 continue;
             }
             String triggerType = stringOr(evtCfg.get("trigger"), null);
-            String triggerCode = stringOr(evtCfg.get("code"), null);
             boolean interrupting = !(Boolean.FALSE.equals(evtCfg.get("interrupting")));
             String calledVer = extractCalledVersionId(cfg);
-            if (triggerType == null || triggerCode == null || calledVer == null) {
-                log.error("event_sub_process '{}' config incompleta (trigger={}, code={}, calledVersion={}) — skip",
-                    el.code(), triggerType, triggerCode, calledVer);
+            if (triggerType == null || calledVer == null) {
+                log.error("event_sub_process '{}' config incompleta (trigger={}, calledVersion={}) — skip",
+                    el.code(), triggerType, calledVer);
                 continue;
             }
             UUID handlerVersionId;
@@ -1358,6 +1357,41 @@ public class ProcessEngine {
                 log.error("event_sub_process '{}' calledProcessversionId invalido: {}", el.code(), calledVer);
                 continue;
             }
+
+            // Por tipo de trigger: signal/error/message usan `code`; message además
+            // resuelve `correlationKey`; timer usa `delaySeconds` y agenda un job.
+            String triggerCode;
+            String correlationKey = null;
+            Long delaySeconds = null;
+            switch (triggerType) {
+                case "signal", "error", "message" -> {
+                    triggerCode = stringOr(evtCfg.get("code"), null);
+                    if (triggerCode == null) {
+                        log.error("event_sub_process '{}' trigger {} sin code — skip", el.code(), triggerType);
+                        continue;
+                    }
+                    if ("message".equals(triggerType)) {
+                        String rawKey = stringOr(evtCfg.get("correlationKey"), null);
+                        correlationKey = rawKey == null ? null
+                            : resolveExpression(rawKey, currentVariablesAsMap(instance));
+                    }
+                }
+                case "timer" -> {
+                    Object d = evtCfg.get("delaySeconds");
+                    try {
+                        delaySeconds = d instanceof Number n ? n.longValue() : Long.parseLong(String.valueOf(d));
+                    } catch (Exception e) {
+                        log.error("event_sub_process '{}' timer con delaySeconds invalido: {} — skip", el.code(), d);
+                        continue;
+                    }
+                    triggerCode = "timer:" + delaySeconds;   // marcador; el timer dispara vía job
+                }
+                default -> {
+                    log.warn("event_sub_process '{}' trigger '{}' no soportado — skip", el.code(), triggerType);
+                    continue;
+                }
+            }
+
             EventSubscriptionEntity sub = new EventSubscriptionEntity();
             sub.setId(UUID.randomUUID());
             sub.setTenantId(instance.getTenantId());
@@ -1366,6 +1400,7 @@ public class ProcessEngine {
             sub.setElementCode(el.code());
             sub.setTriggerType(triggerType);
             sub.setTriggerCode(triggerCode);
+            sub.setCorrelationKey(correlationKey);
             sub.setHandlerVersionId(handlerVersionId);
             sub.setInterrupting(interrupting);
             sub.setLifecycle("active");
@@ -1373,10 +1408,46 @@ public class ProcessEngine {
             sub.setCreatedAt(now);
             sub.setUpdatedAt(now);
             eventSubRepo.save(sub);
-            audit(instance, "event_subprocess.subscribed", el.id(), null, userId, Map.of(
-                "elementCode", el.code(), "trigger", triggerType, "code", triggerCode,
-                "interrupting", interrupting));
+
+            if ("timer".equals(triggerType)) {
+                scheduleEventSubprocessTimer(instance, sub, delaySeconds);
+            }
+
+            Map<String, Object> auditData = new LinkedHashMap<>();
+            auditData.put("elementCode", el.code());
+            auditData.put("trigger", triggerType);
+            auditData.put("code", triggerCode);
+            auditData.put("interrupting", interrupting);
+            if (correlationKey != null) auditData.put("correlationKey", correlationKey);
+            audit(instance, "event_subprocess.subscribed", el.id(), null, userId, auditData);
         }
+    }
+
+    /** Agenda el job timer de un event_sub_process timer-triggered (job_type='timer' + marcador). */
+    private void scheduleEventSubprocessTimer(ProcessInstanceEntity instance, EventSubscriptionEntity sub, long delaySeconds) {
+        OffsetDateTime now = OffsetDateTime.now();
+        JobExecutorEntity job = new JobExecutorEntity();
+        job.setId(UUID.randomUUID());
+        job.setTenantId(instance.getTenantId());
+        job.setProcessinstanceId(instance.getId());
+        job.setTokenId(null);   // el event_sub_process timer NO tiene token (es dormante)
+        job.setJobType("timer");
+        job.setFireAt(now.plusSeconds(delaySeconds));
+        job.setConfig(Map.of(
+            "eventSubprocessTimer", true,
+            "eventSubscriptionId", sub.getId().toString(),
+            "elementCode", sub.getElementCode() == null ? "(none)" : sub.getElementCode(),
+            "delaySeconds", delaySeconds));
+        job.setLifecycle("scheduled");
+        job.setRetries(0);
+        job.setMaxRetries(3);
+        job.setStateId(DEFAULT_STATE_ACTIVE);
+        job.setCreatedAt(now);
+        job.setUpdatedAt(now);
+        jobRepo.save(job);
+        audit(instance, "event_subprocess.timer_scheduled", sub.getElementId(), null, null, Map.of(
+            "elementCode", sub.getElementCode() == null ? "(none)" : sub.getElementCode(),
+            "delaySeconds", delaySeconds));
     }
 
     /** calledProcessversionId de un config con callActivity (reusa el shape de sub_process). */
@@ -1400,6 +1471,43 @@ public class ProcessEngine {
             if (fireEventSubprocess(sub, payload, userId)) fired++;
         }
         return fired;
+    }
+
+    /**
+     * Dispara los event_sub_process suscriptos a un message (desde correlateMessage). A
+     * diferencia del signal (broadcast), el message es punto-a-punto: matchea por messageCode
+     * Y correlationKey (la suscripción con correlationKey null/'*' es wildcard de ese messageCode).
+     */
+    private int fireEventSubprocessesForMessage(String messageCode, String correlationKey,
+                                                Map<String, Object> payload, UUID tenantId, UUID userId) {
+        List<EventSubscriptionEntity> subs = eventSubRepo
+            .findByTenantIdAndTriggerTypeAndTriggerCodeAndLifecycle(tenantId, "message", messageCode, "active");
+        int fired = 0;
+        for (EventSubscriptionEntity sub : subs) {
+            String subKey = sub.getCorrelationKey();
+            boolean keyMatches = subKey == null || subKey.isBlank() || "*".equals(subKey)
+                || subKey.equals(correlationKey);
+            if (keyMatches && fireEventSubprocess(sub, payload, userId)) fired++;
+        }
+        return fired;
+    }
+
+    /** Handler del job timer de un event_sub_process (desde fireTimerJob). Dispara + one-shot. */
+    private void fireEventSubprocessTimer(ProcessInstanceEntity instance, JobExecutorEntity job) {
+        Object subIdObj = job.getConfig() == null ? null : job.getConfig().get("eventSubscriptionId");
+        if (subIdObj == null) { log.warn("event_subprocess timer job {} sin eventSubscriptionId", job.getId()); return; }
+        EventSubscriptionEntity sub = eventSubRepo.findById(UUID.fromString(subIdObj.toString())).orElse(null);
+        if (sub == null || !"active".equals(sub.getLifecycle())) {
+            log.info("event_subprocess timer job {}: suscripción ausente o no-active — skip", job.getId());
+            return;
+        }
+        fireEventSubprocess(sub, null, null);
+        // one-shot: si no era interrupting (fireEventSubprocess no la consumió), consumir acá.
+        if ("active".equals(sub.getLifecycle())) {
+            sub.setLifecycle("consumed");
+            sub.setUpdatedAt(OffsetDateTime.now());
+            eventSubRepo.save(sub);
+        }
     }
 
     /**
@@ -3309,15 +3417,20 @@ public class ProcessEngine {
                 .findByMessagedefIdAndCorrelationKeyAndLifecycle(msgRefId, "*", "waiting");
         }
 
-        if (matches.isEmpty()) {
-            log.info("correlateMessage: no match for messageCode={} correlationKey={}",
-                messageCode, correlationKey);
-            return 0;
-        }
+        // Reactivar SOLO el primero (semántica point-to-point típica) si hubo match de token.
+        int reactivated = matches.isEmpty() ? 0
+            : (advanceFromCorrelation(matches.get(0), payload, "message.received") ? 1 : 0);
 
-        // Reactivar SOLO el primero (semántica point-to-point típica)
-        MessageCorrelationEntity mc = matches.get(0);
-        return advanceFromCorrelation(mc, payload, "message.received") ? 1 : 0;
+        // Ola 6.1 — event_sub_process suscriptos a este message (independiente del catch de
+        // token: un handler dormante puede dispararse por messageCode + correlationKey).
+        UUID tenantId = com.imap.platform.tenant.TenantContextHolder.get();
+        int subprocesses = tenantId == null ? 0
+            : fireEventSubprocessesForMessage(messageCode, correlationKey, payload, tenantId, null);
+
+        if (reactivated == 0 && subprocesses == 0) {
+            log.info("correlateMessage: no match for messageCode={} correlationKey={}", messageCode, correlationKey);
+        }
+        return reactivated;
     }
 
     /**
@@ -3493,6 +3606,18 @@ public class ProcessEngine {
                 jobRepo.save(job);
                 return;
             }
+
+            // Ola 6.1 — timer de event_sub_process: NO tiene token; dispara el handler y termina
+            // (antes del chequeo de token, que asumiría un timer adosado a un flujo).
+            if (job.getConfig() != null && Boolean.TRUE.equals(job.getConfig().get("eventSubprocessTimer"))) {
+                fireEventSubprocessTimer(instance, job);
+                job.setLifecycle("fired");
+                job.setFiredAt(OffsetDateTime.now());
+                job.setUpdatedAt(OffsetDateTime.now());
+                jobRepo.save(job);
+                return;
+            }
+
             TokenEntity token = tokenRepo.findById(job.getTokenId()).orElse(null);
             if (token == null || !"waiting".equals(token.getLifecycle())) {
                 log.warn("fireTimerJob: token {} gone or no longer waiting — cancel job",
