@@ -8,7 +8,7 @@ Microservicio IMAP — **Orquestador de Procesos (BPM)**. Motor BPMN central que
 ## Estado
 
 **En producción — hexagonal estricto ✅ (grade A).** Motor BPMN completo con instancias, tokens, tareas, variables y auditoría.
-129 clases Java, 22 migraciones Flyway (V001–V022), 23 `@Entity`, RLS activo en todas las tablas. Suite de 20 smokes
+133 clases Java, 23 migraciones Flyway (V001–V023), 24 `@Entity`, RLS activo en todas las tablas. Suite de 21 smokes
 E2E contra prod (`smoke_*.ps1`, uno por familia de features). Definiciones de proceso ya en tablas relacionales
 propias de `bpm` (migradas desde el EAV de `system`).
 
@@ -124,6 +124,7 @@ que `bpm` centraliza, porque el punto de deduplicación tiene que vivir del lado
 | Instancias | `GET /v1/bpm/instance/{id}` · `POST /instance/{id}/cancel` · `DELETE /instance/{id}?force=true` |
 | Tareas (WorkHub) | `GET /v1/bpm/me/tasks?view=` · `GET /v1/bpm/me/startable` · `POST /task/{id}/claim` · `POST /task/{id}/complete {outputData}` · `POST /task/{id}/raise-error` |
 | Incidentes | `GET /v1/bpm/incidents?lifecycle=open` · `POST /incident/{id}/retry` · `POST /incident/{id}/resolve` |
+| Overlay de procesos por tenant | `POST /v1/bpm/tenant-process/{code}/enable` · `DELETE /{code}` (disable) · `PUT /{code}/config` · `GET /v1/bpm/tenant-process` |
 | Receptor (cada micro, no `bpm`) | `POST /v1/service-tasks/execute {serviceCode, variables, idempotencyKey, tenantId, ...}` → `{status, resultVariables, errorCode?, boundaryErrorCode?}` |
 
 ### (d) Tablas nuevas
@@ -134,6 +135,9 @@ que `bpm` centraliza, porque el punto de deduplicación tiene que vivir del lado
   correlationKey), consultadas por el motor al despachar signal/message/error/timer.
 - **`bpm_dmn_decisiondef_tbl.required_decisions`**: columna nueva en la tabla de definición de decisiones DMN, para
   DRD chaining (lista de decisiones prerequisito, resueltas en orden topológico).
+- **`bpm_pro_tenant_process_tbl`** (overlay de procesos por tenant, gemelo de `acc_tenant_account` del plan de
+  cuentas): `enabled` (Nivel 1 — el tenant adopta el proceso del catálogo) + `config` jsonb (Nivel 2 — parámetros
+  que el motor inyecta como la variable `config` al arrancar; gateways/DMN la leen). Ver `IMAP_BPM_PROCESS_CATALOG.md §1`.
 
 ## Integraciones
 
@@ -146,8 +150,8 @@ gobierna los procesos de los demás módulos.
 ## Conformidad hexagonal
 
 Hexagonal estricto **grade A**: domain puro (POJOs sin `@Entity` ni imports de infraestructura), `@Entity` solo en
-`infrastructure/entity` (23), ports devuelven modelos de dominio, controllers siempre vía application services.
-Audit-7 en las 23 entidades (con `updatable=false` en columnas núcleo) y RLS por tenant en todas las tablas.
+`infrastructure/entity` (24), ports devuelven modelos de dominio, controllers siempre vía application services.
+Audit-7 en las 24 entidades (con `updatable=false` en columnas núcleo) y RLS por tenant en todas las tablas.
 **Exenciones documentadas**: el motor BPM (`ProcessEngine`) accede a repositorios de entidad directamente por ser la
 máquina de estados central (§F.6); las tablas de estado de runtime del roadmap Camunda-8
 (`bpm_pro_incident_tbl`, `bpm_pro_event_subscription_tbl`) entran en la misma exención §F.6 por ser estado interno
