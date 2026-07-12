@@ -106,6 +106,7 @@ public class ProcessEngine {
     private final com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo;
     private final com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo;
     private final com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo;
+    private final com.imap.bpm.application.TenantProcessService tenantProcessService;
 
     /**
      * Self-injection (lazy) para invocar métodos @Transactional desde otros métodos
@@ -143,7 +144,8 @@ public class ProcessEngine {
                          com.imap.bpm.application.service.TaskAssignmentService taskAssignmentService,
                          com.imap.bpm.infrastructure.repository.CompensationRepository compensationRepo,
                          com.imap.bpm.infrastructure.repository.IncidentRepository incidentRepo,
-                         com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo) {
+                         com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo,
+                         com.imap.bpm.application.TenantProcessService tenantProcessService) {
         this.loader = loader;
         this.instanceRepo = instanceRepo;
         this.tokenRepo = tokenRepo;
@@ -164,6 +166,7 @@ public class ProcessEngine {
         this.compensationRepo = compensationRepo;
         this.incidentRepo = incidentRepo;
         this.eventSubRepo = eventSubRepo;
+        this.tenantProcessService = tenantProcessService;
         this.jexl = new JexlBuilder().silent(true).strict(false).create();
     }
 
@@ -315,6 +318,15 @@ public class ProcessEngine {
         if (parentInstanceId != null) startedAuditData.put("parentInstanceId", parentInstanceId.toString());
         if (parentTokenId != null)    startedAuditData.put("parentTokenId", parentTokenId.toString());
         audit(instance, "instance.started", null, null, userId, startedAuditData);
+
+        // 3a. Overlay de config del tenant (Nivel 2, gemelo del plan de cuentas per-tenant):
+        //     inyecta la variable `config` con los parámetros del tenant para este processdef
+        //     (umbrales, flags, rol→cola, etc.) que los gateways/DMN leen como `${config.X}`.
+        //     Best-effort: si no hay overlay, no inyecta nada. El payload puede sobreescribirla.
+        Map<String, Object> tenantCfg = tenantProcessService.configFor(tenantId, def.processdefCode());
+        if (tenantCfg != null && !tenantCfg.isEmpty()) {
+            setVariable(instance, "config", tenantCfg);
+        }
 
         // 3. Persistir variables iniciales del payload
         if (payload != null) {

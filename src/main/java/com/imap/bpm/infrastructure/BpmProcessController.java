@@ -103,6 +103,7 @@ public class BpmProcessController {
     private final ScoreService scoreService;
     private final SseEventBus sseEventBus;
     private final com.imap.bpm.application.ProcessdefManagementService processdefMgmt;
+    private final com.imap.bpm.application.TenantProcessService tenantProcessService;
 
     @PersistenceContext
     private EntityManager em;
@@ -123,7 +124,8 @@ public class BpmProcessController {
                                 com.imap.bpm.infrastructure.repository.EventSubscriptionRepository eventSubRepo,
                                 ScoreService scoreService,
                                 SseEventBus sseEventBus,
-                                com.imap.bpm.application.ProcessdefManagementService processdefMgmt) {
+                                com.imap.bpm.application.ProcessdefManagementService processdefMgmt,
+                                com.imap.bpm.application.TenantProcessService tenantProcessService) {
         this.engine = engine;
         this.taskRepo = taskRepo;
         this.instanceRepo = instanceRepo;
@@ -141,6 +143,7 @@ public class BpmProcessController {
         this.scoreService = scoreService;
         this.sseEventBus = sseEventBus;
         this.processdefMgmt = processdefMgmt;
+        this.tenantProcessService = tenantProcessService;
     }
 
     @PostMapping("/process/{versionId}/start")
@@ -388,11 +391,18 @@ public class BpmProcessController {
             return List.of();
         }
 
+        // Overlay per-tenant (Nivel 1): si el tenant adoptó el overlay, el menú startable son SOLO
+        // los procesos que habilitó (∩ permisos). Si NO adoptó overlay (fila vacía) → comportamiento
+        // previo (todo el catálogo permitido) para no romper tenants existentes.
+        boolean hasOverlay = tenantProcessService.hasOverlay(tenantId);
+        java.util.Set<String> enabledCodes = hasOverlay ? tenantProcessService.enabledCodes(tenantId) : null;
+
         List<Map<String, Object>> out = new ArrayList<>();
         for (Map<String, Object> d : defs) {
             if (!"active".equals(String.valueOf(d.get("lifecycle")))) continue;   // solo activos
             String code = d.get("code") == null ? null : d.get("code").toString();
             if (code == null) continue;
+            if (hasOverlay && !enabledCodes.contains(code)) continue;   // el tenant no habilitó este proceso
             Object explicitPerm = d.get("startPermission");   // authoritative si system lo provee
             String requiredPerm = explicitPerm != null ? explicitPerm.toString() : "bpm.start." + code;
             if (!perms.contains(requiredPerm)) continue;       // sin permiso → no startable
